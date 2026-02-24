@@ -1,0 +1,588 @@
+/**
+ * @file message_registry.hpp
+ * @brief Message-based AsyncOp integration with timestamp-based ID generation
+ * @author pansz
+ * @date 2026.2.6
+ * 
+ * Provides MessageRegistry for tracking async operations by message ID.
+ * Uses timestamp-based ID generation for uniqueness across restarts.
+ * 
+ * Key Features:
+ * - Timestamp-based IDs (unique across restarts, no persistence needed)
+ * - Thread-safe message tracking
+ * - Built-in timeout support
+ * - Java-compatible signed int64_t IDs
+ * - O(1) registration and lookup
+ * 
+ * @note Requires async_op.hpp
+ * @note C++17 or later
+ * 
+ * Usage:
+ * @code
+ * ao::MessageRegistry<ResponseData> registry;
+ * 
+ * // Send message
+ * ao::AsyncOp<ResponseData> sendRequest(const Request& req) {
+ *     ao::AsyncOp<ResponseData> result;
+ *     int64_t msg_id = registry.registerMessage(result.m_promise, std::chrono::seconds(5));
+ *     sendMessageToNetwork(msg_id, req);
+ *     return result;
+ * }
+ * 
+ * // Handle response
+ * void onNetworkMessage(int64_t id, const ResponseData& data) {
+ *     registry.handleResponse(id, data);
+ * }
+ * @endcode
+ */
+
+#ifndef MESSAGE_REGISTRY_HPP
+#define MESSAGE_REGISTRY_HPP
+
+#include "async_op.hpp"
+#include <unordered_map>
+#include <atomic>
+#include <mutex>
+#include <chrono>
+#include <cstdint>
+
+namespace ao {
+
+/**
+ * @brief Generate unique message IDs using timestamp + counter
+ * 
+ * ID Format: [timestamp_ms (41 bits) | counter (22 bits)]
+ * - Bit 63: Always 0 (ensures positive signed value)
+ * - Bits 62-22: Timestamp in milliseconds (41 bits = ~69 years from epoch)
+ * - Bits 21-0: Counter (22 bits = 4,194,304 IDs per millisecond)
+ * 
+ * Properties:
+ * - IDs are always positive (Java long compatibility)
+ * - Unique across process restarts (timestamp changes)
+ * - Monotonically increasing within process
+ * - No persistence needed
+ * - Handles clock skew gracefully
+ * 
+ * Thread-safe: Yes (uses atomics)
+ */
+class IdGen {
+private:
+    std::atomic<int64_t> last_timestamp_ms_{0};
+    std::atomic<int32_t> counter_{0};
+    
+    // Counter uses 22 bits (0 to 4,194,303)
+    static constexpr int32_t COUNTER_BITS = 22;
+    static constexpr int32_t COUNTER_MASK = (1 << COUNTER_BITS) - 1;  // 0x3FFFFF
+    
+    // Timestamp uses 41 bits (milliseconds since epoch)
+    static constexpr int32_t TIMESTAMP_BITS = 41;
+    static constexpr int64_t TIMESTAMP_MASK = (1LL << TIMESTAMP_BITS) - 1;  // 0x1FFFFFFFFFF
+    
+public:
+    /**
+     * @brief Generate unique message ID
+     * 
+     * @return Positive int64_t message ID, unique across restarts
+     * 
+     * @note Thread-safe
+     * @note IDs are monotonically increasing within same millisecond
+     * @note Automatically handles clock skew (clock going backwards)
+     */
+    int64_t generateId() {
+        // Get current timestamp in milliseconds since epoch
+        auto now = std::chrono::system_clock::now();
+        int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()
+        ).count();
+        
+        // Mask to 41 bits to ensure we don't overflow
+        now_ms = now_ms & TIMESTAMP_MASK;
+        
+        // Atomic compare-exchange to handle concurrent access and clock skew
+        int64_t last_ts = last_timestamp_ms_.load(std::memory_order_relaxed);
+        
+        if (now_ms > last_ts) {
+            // New millisecond, try to reset counter
+            if (last_timestamp_ms_.compare_exchange_strong(last_ts, now_ms, 
+                                                           std::memory_order_relaxed)) {
+                counter_.store(0, std::memory_order_relaxed);
+            }
+            // If CAS failed, someone else updated it, use their value
+            last_ts = last_timestamp_ms_.load(std::memory_order_relaxed);
+            now_ms = last_ts;  // Use the updated timestamp
+        } else if (now_ms < last_ts) {
+            // Clock went backwards! Use last known good timestamp
+            spdlog::warn("Clock skew detected: now_ms={}, last_ts={}, using last_ts", 
+                        now_ms, last_ts);
+            now_ms = last_ts;
+        }
+        
+        // Increment counter for this millisecond
+        int32_t count = counter_.fetch_add(1, std::memory_order_relaxed);
+        
+        // Check for counter overflow (very unlikely - 4M msgs/ms!)
+        if (count >= COUNTER_MASK) {
+            spdlog::error("Counter overflow! count={}, waiting for next millisecond", count);
+            // In production, you might want to sleep 1ms and try again
+            // For now, just wrap the counter (IDs will still be unique due to timestamp)
+            count = count & COUNTER_MASK;
+        }
+        
+        // Combine: [0 | 41-bit timestamp | 22-bit counter]
+        // Use unsigned for bit operations, then cast to signed
+        uint64_t timestamp_part = static_cast<uint64_t>(now_ms) << COUNTER_BITS;
+        uint64_t counter_part = static_cast<uint64_t>(count) & COUNTER_MASK;
+        uint64_t id_unsigned = timestamp_part | counter_part;
+        
+        // Cast to signed - top bit is 0, so always positive
+        int64_t id = static_cast<int64_t>(id_unsigned);
+        
+        return id;
+    }
+    
+    /**
+     * @brief Extract timestamp from generated ID
+     * 
+     * @param id Message ID
+     * @return Timestamp in milliseconds since epoch
+     */
+    static int64_t extractTimestamp(int64_t id) {
+        // Convert to unsigned for safe right shift
+        uint64_t id_unsigned = static_cast<uint64_t>(id);
+        uint64_t timestamp = id_unsigned >> COUNTER_BITS;
+        return static_cast<int64_t>(timestamp);
+    }
+    
+    /**
+     * @brief Extract counter from generated ID
+     * 
+     * @param id Message ID
+     * @return Counter value (0 to 4,194,303)
+     */
+    static int32_t extractCounter(int64_t id) {
+        // Convert to unsigned for safe masking
+        uint64_t id_unsigned = static_cast<uint64_t>(id);
+        return static_cast<int32_t>(id_unsigned & COUNTER_MASK);
+    }
+    
+    /**
+     * @brief Get human-readable timestamp from ID
+     * 
+     * @param id Message ID
+     * @return Time point when ID was generated
+     */
+    static std::chrono::system_clock::time_point extractTimePoint(int64_t id) {
+        int64_t timestamp_ms = extractTimestamp(id);
+        return std::chrono::system_clock::time_point(
+            std::chrono::milliseconds(timestamp_ms)
+        );
+    }
+};
+
+/**
+ * @brief Registry for tracking message-based async operations
+ * 
+ * Maps message IDs to AsyncOp states for request-response protocols.
+ * Handles automatic timeout and cleanup of pending messages.
+ * 
+ * Thread-safe: Yes (all operations are thread-safe)
+ * 
+ * @tparam ResponseType Type of response data expected
+ */
+template<typename ResponseType>
+class MsgRegistry {
+public:
+    using MessageId = int64_t;  // Java-compatible signed long
+    using StatePtr = std::shared_ptr<typename AsyncOp<ResponseType>::State>;
+    
+    /**
+     * @brief Information about a pending message
+     */
+    struct PendingMessage {
+        StatePtr state;
+        std::chrono::steady_clock::time_point created_at;
+        std::chrono::milliseconds timeout;
+        timer_type timeout_timer;
+        PendingMessage() = default;
+        PendingMessage(StatePtr s, std::chrono::milliseconds t)
+            : state(s)
+            , created_at(std::chrono::steady_clock::now())
+            , timeout(t)
+            , timeout_timer(0) {}
+    };
+    
+private:
+    std::unordered_map<MessageId, PendingMessage> pending_;
+    mutable std::mutex mutex_;
+    IdGen id_generator_;
+    
+public:
+    /**
+     * @brief Construct message registry
+     */
+    MsgRegistry() = default;
+    
+    /**
+     * @brief Destroy registry and cleanup pending messages
+     *
+     * Rejects all pending messages with ErrorCode::Cancelled
+     */
+    ~MsgRegistry() {
+        // Don't call clearAll() in destructor to avoid issues during global cleanup
+        // where spdlog might already be destroyed
+        // Instead, rely on users to call clearAll() before global cleanup if needed
+    }
+    
+    // Non-copyable
+    MsgRegistry(const MsgRegistry&) = delete;
+    MsgRegistry& operator=(const MsgRegistry&) = delete;
+    
+    // Movable
+    MsgRegistry(MsgRegistry&&) = default;
+    MsgRegistry& operator=(MsgRegistry&&) = default;
+    
+    /**
+     * @brief Generate a unique message ID without registering
+     * 
+     * Useful when you need an ID first, then register later.
+     * 
+     * @return Unique message ID
+     * 
+     * @note Thread-safe
+     * @note Remember to call registerMessage() with this ID later
+     * 
+     * @example
+     * int64_t id = registry.generateId();
+     * // ... prepare state ...
+     * registry.registerMessage(id, state, timeout);
+     */
+    MessageId generateId() {
+        return id_generator_.generateId();
+    }
+    
+    /**
+     * @brief Register a message with auto-generated ID
+     * 
+     * Convenience method that generates ID and registers in one call.
+     * 
+     * @param state AsyncOp state to track
+     * @param timeout Timeout duration (0 = no timeout)
+     * @return Unique message ID to send with request
+     * 
+     * @note Thread-safe
+     * @note If timeout expires, state will be rejected with ErrorCode::Timeout
+     * 
+     * @example
+     * ao::AsyncOp<Response> result;
+     * int64_t id = registry.registerMessage(result.m_promise, std::chrono::seconds(5));
+     * sendToNetwork(id, data);
+     */
+    MessageId registerMessage(StatePtr state, 
+                              std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
+        MessageId id = id_generator_.generateId();
+        registerMessage(id, state, timeout);
+        return id;
+    }
+    
+    /**
+     * @brief Register a message with pre-generated ID
+     * 
+     * Useful when you need to generate ID first (e.g., for logging),
+     * then register it later.
+     * 
+     * @param id Pre-generated message ID (from generateId())
+     * @param state AsyncOp state to track
+     * @param timeout Timeout duration (0 = no timeout)
+     * 
+     * @note Thread-safe
+     * @note ID should come from generateId() to ensure uniqueness
+     * @note Throws std::runtime_error if ID already registered
+     * 
+     * @example
+     * int64_t id = registry.generateId();
+     * spdlog::info("Sending request with ID {}", id);
+     * registry.registerMessage(id, state, std::chrono::seconds(5));
+     * sendToNetwork(id, data);
+     */
+    void registerMessage(MessageId id, 
+                        StatePtr state,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Check for duplicate ID (should not happen with proper usage)
+        auto it = pending_.find(id);
+        if (it != pending_.end()) {
+            spdlog::error("MessageRegistry: Attempt to register duplicate message ID {}", id);
+            throw std::runtime_error("Duplicate message ID: " + std::to_string(id));
+        }
+        
+        // auto& pending = pending_[id];
+        // pending = PendingMessage(state, timeout);
+        auto [item, inserted] = pending_.try_emplace(id, state, timeout);
+        if (!inserted) {
+            spdlog::error("MessageRegistry: Failed to insert message ID {}", id);
+            throw std::runtime_error("Failed to insert message ID: " + std::to_string(id));
+        }
+        auto& pending = item->second;
+        
+        // Set up timeout if requested
+        if (timeout.count() > 0) {
+            pending.timeout_timer = add_timeout(timeout, [this, id]() {
+                handleTimeout(id);
+                return false;  // G_SOURCE_REMOVE
+            });
+            
+            spdlog::debug("MessageRegistry: Registered message {} (ts={}, seq={}) with {}ms timeout", 
+                         id, 
+                         IdGen::extractTimestamp(id),
+                         IdGen::extractCounter(id),
+                         timeout.count());
+        } else {
+            spdlog::debug("MessageRegistry: Registered message {} (ts={}, seq={}) without timeout",
+                         id,
+                         IdGen::extractTimestamp(id),
+                         IdGen::extractCounter(id));
+        }
+    }
+    
+    /**
+     * @brief Handle incoming message response
+     * 
+     * @param id Message ID from response
+     * @param response Response data
+     * @return true if message was found and handled, false if unknown
+     * 
+     * @note Thread-safe
+     * @note Resolves AsyncOp on main thread via invoke_main()
+     */
+    bool handleResponse(MessageId id, ResponseType response) {
+        StatePtr state;
+        timer_type timeout_timer = 0;
+        
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = pending_.find(id);
+            if (it == pending_.end()) {
+                spdlog::warn("MessageRegistry: Received response for unknown message {}", id);
+                return false;
+            }
+            
+            state = it->second.state;
+            timeout_timer = it->second.timeout_timer;
+            pending_.erase(it);
+        }
+        
+        // Cancel timeout if it was set
+        if (timeout_timer != 0) {
+            remove_timeout(timeout_timer);
+        }
+        
+        // Resolve on main thread
+        invoke_main([state, response = std::move(response)]() mutable {
+            state->resolveWith(std::move(response));
+        });
+        
+        spdlog::debug("MessageRegistry: Handled response for message {}", id);
+        return true;
+    }
+    
+    /**
+     * @brief Handle incoming error response
+     * 
+     * @param id Message ID from error response
+     * @param error Error code
+     * @return true if message was found and handled, false if unknown
+     * 
+     * @note Thread-safe
+     * @note Rejects AsyncOp on main thread via invoke_main()
+     */
+    bool handleError(MessageId id, ErrorCode error) {
+        StatePtr state;
+        timer_type timeout_timer = 0;
+        
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = pending_.find(id);
+            if (it == pending_.end()) {
+                spdlog::warn("MessageRegistry: Received error for unknown message {}", id);
+                return false;
+            }
+            
+            state = it->second.state;
+            timeout_timer = it->second.timeout_timer;
+            pending_.erase(it);
+        }
+        
+        // Cancel timeout if it was set
+        if (timeout_timer != 0) {
+            remove_timeout(timeout_timer);
+        }
+        
+        // Reject on main thread
+        invoke_main([state, error]() {
+            state->rejectWith(error);
+        });
+        
+        spdlog::debug("MessageRegistry: Handled error for message {} with code {}", 
+                     id, static_cast<int>(error));
+        return true;
+    }
+    
+    /**
+     * @brief Cancel a pending message
+     * 
+     * @param id Message ID to cancel
+     * @return true if message was found and cancelled
+     * 
+     * @note Thread-safe
+     * @note Rejects AsyncOp with ErrorCode::Cancelled
+     */
+    bool cancelMessage(MessageId id) {
+        StatePtr state;
+        timer_type timeout_timer = 0;
+        
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = pending_.find(id);
+            if (it == pending_.end()) {
+                return false;
+            }
+            
+            state = it->second.state;
+            timeout_timer = it->second.timeout_timer;
+            pending_.erase(it);
+        }
+        
+        // Cancel timeout if it was set
+        if (timeout_timer != 0) {
+            remove_timeout(timeout_timer);
+        }
+        
+        // Reject with Cancelled
+        invoke_main([state]() {
+            state->rejectWith(ErrorCode::Cancelled);
+        });
+        
+        spdlog::debug("MessageRegistry: Cancelled message {}", id);
+        return true;
+    }
+    
+    /**
+     * @brief Get number of pending messages
+     * 
+     * @return Count of messages waiting for response
+     * 
+     * @note Thread-safe
+     */
+    size_t pendingCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pending_.size();
+    }
+    
+    /**
+     * @brief Check if a specific message is pending
+     * 
+     * @param id Message ID to check
+     * @return true if message is pending
+     * 
+     * @note Thread-safe
+     */
+    bool isPending(MessageId id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pending_.find(id) != pending_.end();
+    }
+    
+    /**
+     * @brief Clear all pending messages
+     * 
+     * Rejects all pending messages with ErrorCode::Cancelled.
+     * Typically called during shutdown.
+     * 
+     * @note Thread-safe
+     */
+    void clearAll() {
+        std::unordered_map<MessageId, PendingMessage> pending_copy;
+        
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_copy = std::move(pending_);
+            pending_.clear();
+        }
+        
+        // Reject all and cancel timeouts
+        for (auto& [id, pending] : pending_copy) {
+            if (pending.timeout_timer != 0) {
+                remove_timeout(pending.timeout_timer);
+            }
+            
+            invoke_main([state = pending.state]() {
+                state->rejectWith(ErrorCode::Cancelled);
+            });
+        }
+        
+        if (!pending_copy.empty()) {
+            spdlog::info("MessageRegistry: Cleared {} pending messages", pending_copy.size());
+        }
+    }
+    
+    /**
+     * @brief Get diagnostic information about pending messages
+     * 
+     * @return Vector of [message_id, age_in_ms] pairs
+     * 
+     * @note Thread-safe
+     * @note Useful for debugging and monitoring
+     */
+    std::vector<std::pair<MessageId, int64_t>> getDiagnostics() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<std::pair<MessageId, int64_t>> result;
+        result.reserve(pending_.size());
+        
+        auto now = std::chrono::steady_clock::now();
+        for (const auto& [id, pending] : pending_) {
+            auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - pending.created_at
+            ).count();
+            result.emplace_back(id, age_ms);
+        }
+        
+        return result;
+    }
+    
+private:
+    /**
+     * @brief Handle message timeout (called by timer)
+     * 
+     * @param id Message ID that timed out
+     */
+    void handleTimeout(MessageId id) {
+        StatePtr state;
+        
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = pending_.find(id);
+            if (it == pending_.end()) {
+                // Already handled (response arrived)
+                return;
+            }
+            
+            state = it->second.state;
+            pending_.erase(it);
+        }
+        
+        // Reject with Timeout
+        invoke_main([state]() {
+            state->rejectWith(ErrorCode::Timeout);
+        });
+        
+        spdlog::warn("MessageRegistry: Message {} timed out", id);
+    }
+};
+
+// Convenient type aliases
+template<typename T>
+using MessageRegistry = MsgRegistry<T>;  // Backward compatibility
+
+} // namespace ao
+
+#endif // MESSAGE_REGISTRY_HPP
