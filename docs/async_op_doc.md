@@ -109,13 +109,13 @@ AsyncOp uses the **Promise/Future pattern**:
 
 ### The Five Core Methods
 
-| Method | Purpose | When Used | Continues Chain? |
-|--------|---------|-----------|------------------|
-| **`.then()`** | Transform success values | Success path | ✅ Yes (can change type) |
-| **`.next()`** | Handle both paths | Dual processing | ✅ Yes (converges types) |
-| **`.recover()`** / **`.otherwise()`** | Convert errors to success | Error recovery | ✅ Yes (error→value) |
-| **`.onError()`** | Final error handling | Error path (terminal) | ❌ No |
-| **`.tap()`** | Side effects | Debugging/logging | ✅ Yes (value unchanged) |
+| Method | Purpose | When Used | Continues Chain? | Overwrite Protection |
+|--------|---------|-----------|------------------|----------------------|
+| **`.then()`** | Transform success values | Success path | ✅ Yes (can change type) | Prevents overwriting existing success callbacks |
+| **`.next()`** | Handle both paths | Dual processing | ✅ Yes (converges types) | Prevents overwriting existing callbacks |
+| **`.recover()`** / **`.otherwise()`** | Convert errors to success | Error recovery | ✅ Yes (error→value) | Allows overwrite if previous callback was for propagation |
+| **`.onError()`** | Final error handling | Error path (terminal) | ❌ No | Prevents overwriting existing error callbacks |
+| **`.tap()`** | Side effects | Debugging/logging | ✅ Yes (value unchanged) | Does not prevent subsequent overwrites |
 
 ### Flow Visualization
 
@@ -198,12 +198,14 @@ template<typename T>
 using Promise = std::shared_ptr<typename AsyncOp<T>::State>;
 
 // Promise methods (producer side):
-promise->resolveWith(T value);           // Settle with success
-promise->rejectWith(ErrorCode error);    // Settle with error
-promise->isPending();                    // Query state
+promise->resolveWith(T value);                       // Settle with success
+promise->rejectWith(ErrorCode error);                // Settle with error
+promise->isPending();                                // Query state
 promise->isResolved();
 promise->isRejected();
 promise->isSettled();
+promise->canOverwriteSuccessCallback();              // Check if success callback can be overwritten
+promise->canOverwriteErrorCallback();                // Check if error callback can be overwritten
 ```
 
 **Key characteristics:**
@@ -249,13 +251,13 @@ future.getError();  // Returns ErrorCode if rejected
 
 ### Important: Single Callback Limitation
 
-⚠️ **Unlike standard Promise/Future libraries, AsyncOp supports only ONE callback per operation:**
+⚠️ **Unlike standard Promise/Future libraries, AsyncOp supports only ONE callback per operation type:**
 
 ```cpp
 // ❌ WRONG: Second then() overwrites first
 AsyncOp<int> op = fetchData();
-op.then([](int x) { spdlog::info("First: {}", x); });   // Overwritten!
-op.then([](int x) { spdlog::info("Second: {}", x); });  // Only this runs
+op.then([](int x) { spdlog::info("First: {}", x); });   // May be prevented!
+op.then([](int x) { spdlog::info("Second: {}", x); });  // Only this runs if overwrite allowed
 
 // ✅ CORRECT: Use .tap() for side effects without overwriting
 fetchData()
@@ -272,7 +274,7 @@ op.otherwise([](ErrorCode e) { processBranchB(e); });    // Error branch
 // Only ONE branch executes (mutually exclusive)
 ```
 
-This design simplifies memory management for embedded systems. The library will log a warning if you overwrite callbacks.
+This design simplifies memory management for embedded systems. The library now includes callback overwrite protection that prevents accidental overwrites unless the previous callback was a propagation callback. The library will log an error if you attempt to overwrite a callback that is not safe to overwrite.
 
 ---
 
@@ -878,16 +880,16 @@ class AsyncOp {
 public:
     // Type alias for promise
     using Promise = std::shared_ptr<State>;
-    
+
     // Construction
     AsyncOp();                                    // Create pending operation
     AsyncOp(const AsyncOp&) = default;            // Copy (shares state)
     AsyncOp(AsyncOp&&) = default;                 // Move
-    
+
     // Static factories
     static AsyncOp<T> resolved(T value);          // Create resolved
     static AsyncOp<T> rejected(ErrorCode err);    // Create rejected
-    
+
     // State queries
     bool isPending() const;
     bool isResolved() const;
@@ -895,7 +897,7 @@ public:
     bool isSettled() const;
     ErrorCode getError() const;
     id_type id() const;                           // For logging/debugging
-    
+
     // Get promise for async callbacks
     Promise<T> promise() const;
     // Or direct member access:
@@ -904,28 +906,38 @@ public:
     // Chaining (returns new AsyncOp)
     template<typename F>
     auto then(F&& f) -> AsyncOp<U>;               // Success handler
+    // NOTE: Callback overwrite protection prevents overwriting existing success callbacks
+    // unless the previous callback was a propagation callback.
     
     template<typename F>
     auto recover(F&& f) -> AsyncOp<T>;            // Error → value
+    // NOTE: Allows overwriting error callbacks when previous callback was for propagation.
     
     template<typename F>
     auto otherwise(F&& f) -> AsyncOp<T>;          // Alias for recover
+    // NOTE: Allows overwriting error callbacks when previous callback was for propagation.
     
     template<typename SuccessF, typename ErrorF>
     auto next(SuccessF&& s, ErrorF&& e) -> AsyncOp<U>;  // Dual-path
+    // NOTE: Callback overwrite protection applies to both success and error handlers.
     
     // Terminal handler (no continuation)
     AsyncOp<T>& onError(std::function<void(ErrorCode)> handler);
+    // NOTE: Callback overwrite protection prevents overwriting existing error callbacks
+    // unless the previous callback was a propagation callback.
     
     // Utilities
     AsyncOp<T> timeout(std::chrono::milliseconds duration);
     
     template<typename F>
     AsyncOp<T> tap(F&& side_effect_fn);           // Side effects
-    
+    // NOTE: Does not prevent subsequent callback overwrites.
+
     template<typename F>
     AsyncOp<T> finally(F&& cleanup_fn);           // Cleanup
-    
+    // NOTE: Callback overwrite protection allows overwriting propagation callbacks
+    // set by methods like recover() and finally().
+
     AsyncOp<T> orElse(T fallback_value, const std::string& log_msg = "");
     
     template<typename F>
@@ -1455,20 +1467,27 @@ void processData() {
 }
 ```
 
-### Problem: Callback Overwritten
+### Problem: Callback Overwrite Prevention
 
 **Symptom:**
-- Only the last `.then()` executes
-- Warning in logs: "then() overwrites previous callback"
+- Only the first `.then()` executes (subsequent ones are prevented)
+- Error in logs: "cannot overwrite then() callback" or "cannot overwrite error handler"
 
 **Cause:**
-AsyncOp supports only ONE callback per operation.
+AsyncOp now includes callback overwrite protection to prevent accidental overwrites. A callback can only be overwritten if:
+- No previous callback exists, OR
+- The previous callback was a propagation callback (set by methods like `recover`, `finally`, etc.)
 
 ```cpp
-// ❌ WRONG - Second then() overwrites first
+// ❌ WRONG - Second then() is prevented from overwriting first
 auto op = fetchData();
-op.then([](Data d) { processA(d); });  // Overwritten!
-op.then([](Data d) { processB(d); });  // Only this runs
+op.then([](Data d) { processA(d); });  // Prevents overwrites!
+op.then([](Data d) { processB(d); });  // This will be prevented and logged
+
+// ✅ CORRECT - Use tap() for side effects
+auto op = fetchData();
+op.then([](Data d) { processMain(d); })  // Main processing
+ .tap([](Data d) { logData(d); });      // Side effect without preventing overwrites
 ```
 
 **Solutions:**
