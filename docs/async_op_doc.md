@@ -254,10 +254,10 @@ future.getError();  // Returns ErrorCode if rejected
 ⚠️ **Unlike standard Promise/Future libraries, AsyncOp supports only ONE callback per operation type:**
 
 ```cpp
-// ❌ WRONG: Second then() overwrites first
+// ❌ WRONG: Second then() cannot overwrite first
 AsyncOp<int> op = fetchData();
-op.then([](int x) { spdlog::info("First: {}", x); });   // May be prevented!
-op.then([](int x) { spdlog::info("Second: {}", x); });  // Only this runs if overwrite allowed
+op.then([](int x) { spdlog::info("First: {}", x); });   // may work.
+op.then([](int x) { spdlog::info("Second: {}", x); });  // This will never run!
 
 // ✅ CORRECT: Use .tap() for side effects without overwriting
 fetchData()
@@ -303,12 +303,12 @@ ao::AsyncOp<Data> fetchDataAsync() {
 
 ```cpp
 // ✅ CORRECT
-ao::AsyncOp<int> op;
-ao::Promise<int> promise = op.promise();
+ao::AsyncOp<int> future;
+ao::Promise<int> promise = future.promise();
 add_timeout(ms, [promise]() { promise->resolveWith(42); });
 
 // ❌ WRONG - Don't capture the future
-add_timeout(ms, [op]() { /* How do we settle it? */ });
+add_timeout(ms, [future]() { /* How do we settle it? */ });
 ```
 
 #### Alternative: Direct member access (for brevity)
