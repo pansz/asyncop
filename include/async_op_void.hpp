@@ -586,6 +586,7 @@ public:
         auto cleanup_done = std::make_shared<bool>(false);
 
         if (m_promise->canOverwriteSuccessCallback()) {
+            m_promise->status_flags.success_cb_is_propagating = 0;
             // Success path: cleanup then propagate
             m_promise->success_cb = [cleanup, cleanup_done, result_state,
                                      op_id = m_promise->op_id]() mutable {
@@ -609,10 +610,11 @@ public:
         }
 
         if (m_promise->canOverwriteErrorCallback()) {
+            m_promise->status_flags.error_cb_is_propagating = 0;
             // Error path: cleanup then propagate error
             m_promise->error_cb = [cleanup, cleanup_done, result_state, op_id = m_promise->op_id](ErrorCode err) mutable {
                 spdlog::debug("AsyncOp[{}] executing finally (error)", op_id);
-                
+
                 if (!*cleanup_done) {
                     *cleanup_done = true;
                     try {
@@ -623,7 +625,7 @@ public:
                         spdlog::error("Unknown exception in finally()");
                     }
                 }
-                
+
                 result_state->rejectWith(err);
             };
         } else {
@@ -642,15 +644,14 @@ public:
 
     /**
      * @brief Provide fallback value on any error
-     * @param fallback_value Value to use if operation fails
      * @param log_message Optional warning message to log on error
      */
     AsyncOp<void> orElse(const std::string& log_message = "") {
-        return this->otherwise([ 
-                            log_message, 
+        return this->otherwise([
+                            log_message,
                             op_id = m_promise->op_id](ErrorCode err) mutable -> void {
             if (!log_message.empty()) {
-                spdlog::warn("AsyncOp[{}] {}: error {}", op_id, log_message, 
+                spdlog::warn("AsyncOp[{}] {}: error {}", op_id, log_message,
                             static_cast<int>(err));
             }
             return;
