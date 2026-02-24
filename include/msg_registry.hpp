@@ -49,44 +49,44 @@
 namespace ao {
 
 /**
- * @brief Generate unique message IDs using timestamp + counter
- * 
+ * @brief Generate unique message IDs using timestamp + continuous counter
+ *
  * ID Format: [timestamp_ms (41 bits) | counter (22 bits)]
  * - Bit 63: Always 0 (ensures positive signed value)
  * - Bits 62-22: Timestamp in milliseconds (41 bits = ~69 years from epoch)
  * - Bits 21-0: Counter (22 bits = 4,194,304 IDs per millisecond)
- * 
+ *
  * Properties:
  * - IDs are always positive (Java long compatibility)
  * - Unique across process restarts (timestamp changes)
- * - Monotonically increasing within process
+ * - Monotonically increasing globally by using continuous counter
  * - No persistence needed
- * - Handles clock skew gracefully
- * 
+ * - Handles clock skew gracefully by using continuous counter increment
+ *
  * Thread-safe: Yes (uses atomics)
  */
 class IdGen {
 private:
     std::atomic<int64_t> last_timestamp_ms_{0};
-    std::atomic<int32_t> counter_{0};
-    
+    std::atomic<int64_t> global_counter_{0};  // Continuous counter across time periods
+
     // Counter uses 22 bits (0 to 4,194,303)
     static constexpr int32_t COUNTER_BITS = 22;
     static constexpr int32_t COUNTER_MASK = (1 << COUNTER_BITS) - 1;  // 0x3FFFFF
-    
+
     // Timestamp uses 41 bits (milliseconds since epoch)
     static constexpr int32_t TIMESTAMP_BITS = 41;
     static constexpr int64_t TIMESTAMP_MASK = (1LL << TIMESTAMP_BITS) - 1;  // 0x1FFFFFFFFFF
-    
+
 public:
     /**
      * @brief Generate unique message ID
-     * 
+     *
      * @return Positive int64_t message ID, unique across restarts
-     * 
+     *
      * @note Thread-safe
-     * @note IDs are monotonically increasing within same millisecond
-     * @note Automatically handles clock skew (clock going backwards)
+     * @note IDs are monotonically increasing globally by using continuous counter
+     * @note Automatically handles clock skew by using continuous counter increment
      */
     int64_t generateId() {
         // Get current timestamp in milliseconds since epoch
@@ -94,49 +94,35 @@ public:
         int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now.time_since_epoch()
         ).count();
-        
+
         // Mask to 41 bits to ensure we don't overflow
         now_ms = now_ms & TIMESTAMP_MASK;
+
+        // Atomically increment the global counter and get its value
+        int64_t current_counter = global_counter_.fetch_add(1, std::memory_order_relaxed);
         
-        // Atomic compare-exchange to handle concurrent access and clock skew
-        int64_t last_ts = last_timestamp_ms_.load(std::memory_order_relaxed);
+        // Extract counter portion (masked to fit in 22 bits)
+        int32_t counter_part = static_cast<int32_t>(current_counter & COUNTER_MASK);
         
-        if (now_ms > last_ts) {
-            // New millisecond, try to reset counter
-            if (last_timestamp_ms_.compare_exchange_strong(last_ts, now_ms, 
-                                                           std::memory_order_relaxed)) {
-                counter_.store(0, std::memory_order_relaxed);
+        // Update the last timestamp if the current one is greater
+        int64_t expected_last = last_timestamp_ms_.load(std::memory_order_relaxed);
+        while (now_ms > expected_last) {
+            if (last_timestamp_ms_.compare_exchange_weak(expected_last, now_ms, 
+                                                       std::memory_order_relaxed)) {
+                break;  // Successfully updated
             }
-            // If CAS failed, someone else updated it, use their value
-            last_ts = last_timestamp_ms_.load(std::memory_order_relaxed);
-            now_ms = last_ts;  // Use the updated timestamp
-        } else if (now_ms < last_ts) {
-            // Clock went backwards! Use last known good timestamp
-            spdlog::warn("Clock skew detected: now_ms={}, last_ts={}, using last_ts", 
-                        now_ms, last_ts);
-            now_ms = last_ts;
+            // If CAS failed, expected_last was updated, try again
         }
-        
-        // Increment counter for this millisecond
-        int32_t count = counter_.fetch_add(1, std::memory_order_relaxed);
-        
-        // Check for counter overflow (very unlikely - 4M msgs/ms!)
-        if (count >= COUNTER_MASK) {
-            spdlog::error("Counter overflow! count={}, waiting for next millisecond", count);
-            // In production, you might want to sleep 1ms and try again
-            // For now, just wrap the counter (IDs will still be unique due to timestamp)
-            count = count & COUNTER_MASK;
-        }
-        
+
         // Combine: [0 | 41-bit timestamp | 22-bit counter]
         // Use unsigned for bit operations, then cast to signed
         uint64_t timestamp_part = static_cast<uint64_t>(now_ms) << COUNTER_BITS;
-        uint64_t counter_part = static_cast<uint64_t>(count) & COUNTER_MASK;
-        uint64_t id_unsigned = timestamp_part | counter_part;
-        
+        uint64_t counter_val = static_cast<uint64_t>(counter_part) & COUNTER_MASK;
+        uint64_t id_unsigned = timestamp_part | counter_val;
+
         // Cast to signed - top bit is 0, so always positive
         int64_t id = static_cast<int64_t>(id_unsigned);
-        
+
         return id;
     }
     

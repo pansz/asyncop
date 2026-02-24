@@ -17,11 +17,24 @@ target_include_directories(asyncop INTERFACE
 # Find dependencies
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB REQUIRED glib-2.0)
-find_package(Qt5 COMPONENTS Core REQUIRED)
 find_package(spdlog REQUIRED)
 
+# Try to find Qt5 (optional)
+find_package(Qt5 COMPONENTS Core Widgets Network QUIET)
+if(Qt5_FOUND)
+    set(HAVE_QT5 TRUE)
+    message(STATUS "Qt5 found - building Qt support")
+else()
+    set(HAVE_QT5 FALSE)
+    message(WARNING "Qt5 not found - building without Qt support")
+endif()
+
 # Link dependencies
-target_link_libraries(asyncop INTERFACE ${GLIB_LIBRARIES} Qt5::Core spdlog::spdlog)
+if(HAVE_QT5)
+    target_link_libraries(asyncop INTERFACE ${GLIB_LIBRARIES} Qt5::Core Qt5::Widgets Qt5::Network spdlog::spdlog)
+else()
+    target_link_libraries(asyncop INTERFACE ${GLIB_LIBRARIES} spdlog::spdlog)
+endif()
 target_include_directories(asyncop SYSTEM INTERFACE ${GLIB_INCLUDE_DIRS})
 target_compile_options(asyncop INTERFACE ${GLIB_CFLAGS_OTHER})
 

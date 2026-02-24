@@ -1,8 +1,9 @@
 #include "async_op.hpp"
 #include <iostream>
 #include <string>
+#include <set>
+#include <vector>
 #ifdef ASYNC_USE_QT
-# include <vector>
 # include <QCoreApplication>
 # include <QTimer>
 # include <QEventLoop>
@@ -11,6 +12,9 @@
 #else
 # include <glib.h>
 #endif
+
+// Include msg_registry for IdGen tests
+#include "msg_registry.hpp"
 
 // Global test counter
 static int g_totalTests = 0;
@@ -1047,6 +1051,48 @@ void testPollUntilMaxAttempts()
 // UTILITY TESTS
 // ══════════════════════════════════════════════
 
+void testIdGeneration()
+{
+    std::cout << "\n=== Testing ID Generation (IdGen) ===" << std::endl;
+
+    ao::IdGen idGen;
+    
+    // Test 1: Basic ID generation and uniqueness
+    std::set<int64_t> generatedIds;
+    for (int i = 0; i < 100; ++i) {
+        int64_t id = idGen.generateId();
+        runTest("IdGen generates positive IDs", id > 0, true);
+        runTest("IdGen generates unique IDs", generatedIds.insert(id).second, true);
+    }
+    
+    // Test 2: Monotonic increase
+    std::vector<int64_t> ids;
+    for (int i = 0; i < 10; ++i) {
+        ids.push_back(idGen.generateId());
+    }
+    
+    bool isMonotonic = true;
+    for (size_t i = 1; i < ids.size(); ++i) {
+        if (ids[i] <= ids[i-1]) {
+            isMonotonic = false;
+            break;
+        }
+    }
+    runTest("IdGen IDs are monotonic", isMonotonic, true);
+    
+    // Test 3: Extract functions work correctly
+    int64_t sampleId = idGen.generateId();
+    int64_t extractedTimestamp = ao::IdGen::extractTimestamp(sampleId);
+    int32_t extractedCounter = ao::IdGen::extractCounter(sampleId);
+    
+    runTest("extractTimestamp works", extractedTimestamp > 0, true);
+    runTest("extractCounter works", extractedCounter >= 0, true);
+    
+    // Test 4: Reconstruction consistency
+    uint64_t reconstructed = (static_cast<uint64_t>(extractedTimestamp) << 22) | extractedCounter;
+    runTest("ID reconstruction", static_cast<int64_t>(reconstructed) == sampleId, true);
+}
+
 void testDelay()
 {
     std::cout << "\n=== Testing delay() ===" << std::endl;
@@ -1651,6 +1697,7 @@ int test_main_asyncop()
         testPollUntilMaxAttempts();
         
         // Utilities
+        testIdGeneration();
         testDelay();
         testDefer();
         testDeferException();
