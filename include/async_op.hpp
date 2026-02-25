@@ -47,6 +47,10 @@ enum class ErrorCode {
     Unknown
 };
 
+// Static assertion to ensure ErrorCode enum fits in the 4-bit bitfield
+static_assert(static_cast<int>(ErrorCode::Unknown) < 16,
+              "ErrorCode enum exceeds 4-bit bitfield capacity");
+
 /**
  * @brief Convert ErrorCode to string name
  * @param ec Error code
@@ -159,7 +163,7 @@ public:
         // Combined status and flags to reduce memory footprint
         struct StatusFlags {
             unsigned int status : 2;                    // 2 bits: Pending/Resolved/Rejected
-            unsigned int error_code : 4;                // 4 bits: enough for ErrorCode enum
+            unsigned int error_code : 4;                // 4 bits: ErrorCode enum (static_assert enforces < 16 values)
             unsigned int success_cb_is_propagating : 1; // 1 bit: flag for success callback
             unsigned int error_cb_is_propagating : 1;   // 1 bit: flag for error callback
             unsigned int reserved : 24;                 // 24 bits: reserved for future use
@@ -250,8 +254,8 @@ public:
     bool isSettled() const { return m_promise->isSettled(); }
     ErrorCode errorCode() const { return m_promise->getErrorCode(); }
     id_type id() const { return m_promise->op_id; }
-    // Call it shared state, or promise, its the producer, or the promise.
-    // capture this instead of the asyncOp, which is the consumer, or the future.
+
+    /// @brief Get the underlying promise (shared state) for capturing in callbacks
     Promise<T> promise() const { return m_promise; }
 
     static AsyncOp<T> resolved(T value) {

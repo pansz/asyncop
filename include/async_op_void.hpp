@@ -132,8 +132,8 @@ public:
     bool isSettled() const { return m_promise->isSettled(); }
     ErrorCode errorCode() const { return m_promise->getErrorCode(); }
     id_type id() const { return m_promise->op_id; }
-    // Call it shared state, or promise, its the producer, or the promise.
-    // capture this instead of the asyncOp, which is the consumer, or the future.
+
+    /// @brief Get the underlying promise (shared state) for capturing in callbacks
     Promise<void> promise() const { return m_promise; }
 
     static AsyncOp<void> resolved() {
