@@ -107,13 +107,14 @@ AsyncOp uses the **Promise/Future pattern**:
   - Captured in async callbacks to settle the operation
   - Obtained via `.promise()` method on AsyncOp
 
-### The Five Core Methods
+### The Six Core Methods
 
 | Method | Purpose | When Used | Continues Chain? | Overwrite Protection |
 |--------|---------|-----------|------------------|----------------------|
 | **`.then()`** | Transform success values | Success path | ✅ Yes (can change type) | Prevents overwriting existing success callbacks |
 | **`.next()`** | Handle both paths | Dual processing | ✅ Yes (converges types) | Prevents overwriting existing callbacks |
 | **`.recover()`** / **`.otherwise()`** | Convert errors to success | Error recovery | ✅ Yes (error→value) | Allows overwrite if previous callback was for propagation |
+| **`.onSuccess()`** | Final success handling | Success path (terminal) | ❌ No | Prevents overwriting existing success callbacks |
 | **`.onError()`** | Final error handling | Error path (terminal) | ❌ No | Prevents overwriting existing error callbacks |
 | **`.tap()`** | Side effects | Debugging/logging | ✅ Yes (value unchanged) | Does not prevent subsequent overwrites |
 
@@ -124,6 +125,11 @@ Linear Success Chain:
     operation → .then() → .then() → .then() → success!
                    ↓         ↓         ↓
                    └─────────┴─────────→ .onError() (if any fails)
+
+Terminal Success Chain:
+    operation → .then() → .then() → .onSuccess() (terminates chain)
+                   ↓         ↓
+                   └─────────┴─────→ .onError() (if any fails)
 
 Error Recovery (Single Chain):
     operation → .recover() → .then() → success!
@@ -140,7 +146,7 @@ Independent Branching (Mutually Exclusive):
     operation ──────→ .then(A) → .then(B) → ...     (Success branch)
        │
        └───────────→ .otherwise(C) → .then(D) → ... (Error branch)
-    
+
     Only ONE branch executes
 ```
 
@@ -150,6 +156,7 @@ Independent Branching (Mutually Exclusive):
 - **`.then()`**: Executes on success, **auto-propagates errors unchanged**
 - **`.recover()`** / **`.otherwise()`**: Execute on error, **auto-propagate successes unchanged**
 - **`.next()`**: Executes appropriate handler for **both** success and error, **always continues**
+- **`.onSuccess()`**: Executes on success, **terminates the chain** (no continuation)
 - **`.onError()`**: Executes on error, **terminates the chain** (no continuation)
 
 **Type Transformation:**
@@ -259,6 +266,11 @@ AsyncOp<int> op = fetchData();
 op.then([](int x) { spdlog::info("First: {}", x); });   // may work.
 op.then([](int x) { spdlog::info("Second: {}", x); });  // This will never run!
 
+// ❌ WRONG: Second onSuccess() cannot overwrite first
+AsyncOp<int> op = fetchData();
+op.onSuccess([](int x) { spdlog::info("First: {}", x); });   // may work.
+op.onSuccess([](int x) { spdlog::info("Second: {}", x); });  // This will never run!
+
 // ✅ CORRECT: Use .tap() for side effects without overwriting
 fetchData()
     .tap([](int x) { spdlog::info("Logging: {}", x); })  // Side effect
@@ -272,6 +284,17 @@ Promise<int> promise = op.promise();
 op.then([](int x) { processBranchA(x); });               // Success branch
 op.otherwise([](ErrorCode e) { processBranchB(e); });    // Error branch
 // Only ONE branch executes (mutually exclusive)
+
+// ✅ CORRECT: Use onSuccess() as terminal success handler
+fetchData()
+    .then([](int x) { return processResult(x); })
+    .onSuccess([](ProcessedData data) {                  // Terminal success handler
+        displayResult(data);
+    })
+    .onError([](ErrorCode err) {                         // Terminal error handler
+        handleError(err);
+    });
+// Only one of onSuccess() or onError() will execute
 ```
 
 This design simplifies memory management for embedded systems. The library now includes callback overwrite protection that prevents accidental overwrites unless the previous callback was a propagation callback. The library will log an error if you attempt to overwrite a callback that is not safe to overwrite.
@@ -393,6 +416,22 @@ operation()
         // Error path (terminal - no continuation)
         spdlog::error("Operation failed: {}", err);
     });
+
+// Using onSuccess() for terminal success handling
+operation()
+    .then([](Result r) {
+        // Success path - transform or continue chain
+        return processResult(r);
+    })
+    .onSuccess([](ProcessedResult result) {
+        // Terminal success handler (no continuation)
+        displayResult(result);
+    })
+    .onError([](ao::ErrorCode err) {
+        // Terminal error handler (no continuation)
+        spdlog::error("Operation failed: {}", err);
+    });
+// Only one of onSuccess() or onError() will execute
 ```
 
 ### Essential Utilities
@@ -921,10 +960,16 @@ public:
     auto next(SuccessF&& s, ErrorF&& e) -> AsyncOp<U>;  // Dual-path
     // NOTE: Callback overwrite protection applies to both success and error handlers.
     
-    // Terminal handler (no continuation)
+    // Terminal handlers (no continuation)
+    AsyncOp<T>& onSuccess(std::function<void(T)> handler);
+    // NOTE: Callback overwrite protection prevents overwriting existing success callbacks
+    // unless the previous callback was a propagation callback.
+    // WARNING: If not the last handler in chain, the next handler must be recover() or otherwise().
+
     AsyncOp<T>& onError(std::function<void(ErrorCode)> handler);
     // NOTE: Callback overwrite protection prevents overwriting existing error callbacks
     // unless the previous callback was a propagation callback.
+    // WARNING: If not the last handler in chain, the next handler must be then().
     
     // Utilities
     AsyncOp<T> timeout(std::chrono::milliseconds duration);
@@ -939,10 +984,43 @@ public:
     // set by methods like recover() and finally().
 
     AsyncOp<T> orElse(T fallback_value, const std::string& log_msg = "");
-    
+
     template<typename F>
     AsyncOp<T> recoverFrom(ErrorCode err, F&& handler);  // Specific error
 };
+
+### Chaining Rules and Constraints
+
+When using terminal handlers like `onSuccess()` and `onError()`, be aware of the following constraints:
+
+1. **`.onSuccess()` as terminal handler**: When using `onSuccess()` as a terminal success handler,
+   if it's not the last handler in the chain, the next handler must be `recover()` or `otherwise()`.
+
+2. **`.onError()` as terminal handler**: When using `onError()` as a terminal error handler,
+   if it's not the last handler in the chain, the next handler must be `then()`.
+
+3. **Callback overwrite protection**: Both `onSuccess()` and `onError()` follow the same 
+   overwrite protection rules as other handlers - they can only overwrite previous handlers
+   if no handler exists or if the previous handler was a propagation callback.
+
+```cpp
+// ✅ CORRECT: onSuccess followed by recover (valid combination)
+operation()
+    .then([](T val) { return process(val); })
+    .onSuccess([](ProcessedVal val) { display(val); })  // Terminal success handler
+    .recover([](ErrorCode err) { return getDefault(); }); // Next must be recover/otherwise
+
+// ✅ CORRECT: onError followed by then (valid combination)  
+operation()
+    .then([](T val) { return process(val); })
+    .onError([](ErrorCode err) { logError(err); })      // Terminal error handler
+    .then([](T val) { return transform(val); });         // Next must be then
+
+// ❌ INCORRECT: onSuccess followed by then (invalid combination)
+operation()
+    .then([](T val) { return process(val); })
+    .onSuccess([](ProcessedVal val) { display(val); })  // Terminal success handler
+    .then([](T val) { return transform(val); });         // ERROR: Should be recover/otherwise
 ```
 
 ### Promise<T> (Type Alias)
@@ -1471,7 +1549,7 @@ void processData() {
 
 **Symptom:**
 - Only the first `.then()` executes (subsequent ones are prevented)
-- Error in logs: "cannot overwrite then() callback" or "cannot overwrite error handler"
+- Error in logs: "cannot overwrite then() callback", "cannot overwrite success handler", or "cannot overwrite error handler"
 
 **Cause:**
 AsyncOp now includes callback overwrite protection to prevent accidental overwrites. A callback can only be overwritten if:
@@ -1782,53 +1860,40 @@ add_timeout(ms, [promise = op.m_promise]() {
 
 ---
 
-## Before Releasing to GitHub
+## Project Structure and Build Configuration
 
-You've built a solid async library! Here's your **pre-release checklist**:
+
+Understanding the project structure and build configuration will help you navigate and extend the AsyncOp library.
 
 ### 1. Repository Structure
 
 ```
-async-op/
+asyncop/
 ├── README.md                    # Overview, quick start, badges
-├── LICENSE                      # MIT license recommended
+├── LICENSE                      # MIT license
 ├── CMakeLists.txt              # Build configuration
 ├── .gitignore                  # Ignore build/, *.o, etc.
+├── .clang-format               # Code formatting rules
+├── CHANGELOG.md                # Version history
+├── CONTRIBUTING.md             # Contribution guidelines
 │
 ├── include/
-│   ├── async_op.hpp            # Main header
-│   ├── async_op_void.hpp       # Void specialization
-│   └── ao_event_loop.hpp       # Event loop abstraction
+│   ├── async_op.hpp            # Main header for AsyncOp<T>
+│   └── async_op_void.hpp       # Specialization for AsyncOp<void>
 │
 ├── docs/
-│   ├── AsyncOp_Documentation.md  # This file
-│   ├── CHANGELOG.md            # Version history
-│   └── examples/               # Code examples
+│   └── async_op_doc.md         # Comprehensive documentation
 │
 ├── tests/
-│   ├── test_asyncop.cpp        # Test suite
-│   └── CMakeLists.txt
+│   └── ...                     # Unit tests
 │
 └── examples/
-    ├── basic_usage.cpp
-    ├── error_recovery.cpp
-    ├── worker_threads.cpp
-    └── CMakeLists.txt
+    └── CMakeLists.txt          # Example build configuration
 ```
 
-### 2. Essential Files
+### 2. Build Configuration
 
-#### README.md
-- **Badges**: License, C++ version, build status
-- **Quick example** (5-10 lines showing the value)
-- **Features** (bullet points)
-- **Installation** instructions
-- **Documentation** link
-- **License** mention
-
-#### LICENSE
-- MIT License recommended for open source
-- Or choose from: Apache 2.0, BSD, GPL
+The library uses CMake for build configuration with the following features:
 
 #### CMakeLists.txt
 ```cmake
@@ -1837,6 +1902,9 @@ project(AsyncOp VERSION 2.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Options
+option(BUILD_TESTS "Build tests" ON)
 
 # Library (header-only)
 add_library(asyncop INTERFACE)
@@ -1848,101 +1916,43 @@ target_include_directories(asyncop INTERFACE
 # Find dependencies
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB REQUIRED glib-2.0)
-pkg_check_modules(SPDLOG REQUIRED spdlog)
+find_package(spdlog REQUIRED)
 
-target_link_libraries(asyncop INTERFACE ${GLIB_LIBRARIES} ${SPDLOG_LIBRARIES})
+# Try to find Qt5 (optional)
+find_package(Qt5 COMPONENTS Core Widgets Network QUIET)
+if(Qt5_FOUND)
+    set(HAVE_QT5 TRUE)
+    message(STATUS "Qt5 found - building Qt support")
+else()
+    set(HAVE_QT5 FALSE)
+    message(WARNING "Qt5 not found - building without Qt support")
+endif()
 
-# Optional: Tests
-option(BUILD_TESTS "Build tests" ON)
+# Link dependencies
+if(HAVE_QT5)
+    target_link_libraries(asyncop INTERFACE ${GLIB_LIBRARIES} Qt5::Core Qt5::Widgets Qt5::Network spdlog::spdlog)
+else()
+    target_link_libraries(asyncop INTERFACE ${GLIB_LIBRARIES} spdlog::spdlog)
+endif()
+target_include_directories(asyncop SYSTEM INTERFACE ${GLIB_INCLUDE_DIRS})
+target_compile_options(asyncop INTERFACE ${GLIB_CFLAGS_OTHER})
+
+# Options
+option(BUILD_EXAMPLES "Build examples" ON)
+
+# Add tests if enabled
 if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
 
-# Optional: Examples
-option(BUILD_EXAMPLES "Build examples" ON)
+# Add examples if enabled
 if(BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 ```
 
-#### CHANGELOG.md
-```markdown
-# Changelog
-
-## [2.2.0] - 2026-02-13
-
-### Added
-- Promise<T> type alias for clearer Promise/Future semantics
-- fmt formatter for ErrorCode enum
-- Event loop abstraction in separate header (ao_event_loop.hpp)
-
-### Changed
-- Renamed internal state_ to m_promise for clarity
-- Updated all error logging to use formatter
-
-### Fixed
-- Documentation clarity around Promise/Future model
-
-## [2.1.0] - 2026-02-08
-...
-```
-
-### 3. Code Quality
-
-- [ ] **Remove debug code** - Clean up any temporary logging
-- [ ] **Consistent formatting** - Run clang-format
-- [ ] **No warnings** - Compile with `-Wall -Wextra -Werror`
-- [ ] **Documentation** - All public APIs documented
-- [ ] **Examples** - At least 3-5 working examples
-- [ ] **Tests** - Core functionality covered
-
-### 4. Documentation
-
-- [ ] **API reference** - All methods documented (✅ done in this doc)
-- [ ] **Examples** - Common use cases shown
-- [ ] **Migration guide** - If upgrading from v2.1
-- [ ] **Performance notes** - When to use parallel vs sequential
-- [ ] **Thread safety** - Clear guidelines
-- [ ] **Troubleshooting** - Common issues
-
-### 5. Optional But Recommended
-
-- [ ] **CI/CD** - GitHub Actions for build/test
-- [ ] **Code coverage** - Show test coverage percentage
-- [ ] **Benchmarks** - Performance comparison
-- [ ] **Contributing guide** - CONTRIBUTING.md
-- [ ] **Code of conduct** - CODE_OF_CONDUCT.md
-
-### 6. GitHub-Specific
-
-- [ ] **Topics/tags** - C++, async, promises, embedded, linux
-- [ ] **Description** - One-line summary for GitHub header
-- [ ] **GitHub Pages** - Optional: Host docs
-- [ ] **Releases** - Use GitHub releases for versions
-
-### 7. Final Checklist
-
-Before `git push`:
-
-```bash
-# Clean build
-rm -rf build && mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-
-# Run tests
-ctest --output-on-failure
-
-# Check for warnings
-make 2>&1 | grep -i warning
-
-# Format code
-find ../include -name "*.hpp" -exec clang-format -i {} \;
-
-# Spell check docs
-aspell check ../docs/AsyncOp_Documentation.md
-```
+This configuration supports both GLib and Qt backends, with spdlog for logging and pkg-config for dependency management.
 
 ---
 
@@ -1950,17 +1960,11 @@ aspell check ../docs/AsyncOp_Documentation.md
 
 **AsyncOp v2.2** provides production-ready Promise/Future semantics for embedded Linux:
 
-✅ **Clear Promise/Future model** - `AsyncOp<T>` = Future, `Promise<T>` = Promise  
-✅ **Powerful chaining** - `.then()`, `.recover()`, `.next()`, `.otherwise()`  
-✅ **Error handling** - Multiple patterns for resilient async workflows  
-✅ **Collection operations** - Sequential and parallel processing  
-✅ **Thread-safe** - Worker thread integration via `invoke_main()`  
-✅ **Type-safe** - Compile-time checking, no runtime surprises  
-✅ **Embedded-friendly** - Minimal overhead, designed for 64MB+ systems  
+✅ **Clear Promise/Future model** - `AsyncOp<T>` = Future, `Promise<T>` = Promise
+✅ **Powerful chaining** - `.then()`, `.recover()`, `.next()`, `.otherwise()`
+✅ **Error handling** - Multiple patterns for resilient async workflows
+✅ **Collection operations** - Sequential and parallel processing
+✅ **Thread-safe** - Worker thread integration via `invoke_main()`
+✅ **Type-safe** - Compile-time checking, no runtime surprises
+✅ **Embedded-friendly** - Minimal overhead, designed for 64MB+ systems
 ✅ **Dual backend** - GLib 2.0+ or Qt 5.12+
-
-**Ready for GitHub? Almost!** 
-
-Complete the checklist above, and you'll have a professional, well-documented library ready for the community. 🚀
-
-**Good luck with your release!**

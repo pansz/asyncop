@@ -166,10 +166,10 @@ public:
         };
 
         // Optimized member ordering for memory layout (largest to smallest)
-        T result_value;                           // Largest: could be std::string, nlohmann::json, etc.
         std::function<void(T)> success_cb;       // std::function is typically quite large
         std::function<void(ErrorCode)> error_cb; // std::function is typically quite large
-        id_type op_id;                          // Usually size_t or similar
+        T result_value;                          // Largest: could be std::string, nlohmann::json, etc.
+        id_type op_id;                           // Usually size_t or similar
         StatusFlags status_flags;                // Combined status, error code and flags in 1 byte
         
         State() : op_id(detail::get_next_async_op_id()) {
@@ -201,7 +201,7 @@ public:
         void setStatus(Status new_status) {
             status_flags.status = new_status;
         }
-        
+
         bool canOverwriteSuccessCallback() const {
             return !success_cb || status_flags.success_cb_is_propagating;
         }
@@ -248,11 +248,12 @@ public:
     bool isResolved() const { return m_promise->isResolved(); }
     bool isRejected() const { return m_promise->isRejected(); }
     bool isSettled() const { return m_promise->isSettled(); }
-    ErrorCode getError() const { return m_promise->getErrorCode(); }
+    ErrorCode errorCode() const { return m_promise->getErrorCode(); }
     id_type id() const { return m_promise->op_id; }
     // Call it shared state, or promise, its the producer, or the promise.
     // capture this instead of the asyncOp, which is the consumer, or the future.
     Promise<T> promise() const { return m_promise; }
+
     static AsyncOp<T> resolved(T value) {
         AsyncOp<T> op;
         op.m_promise->resolveWith(std::move(value));
@@ -275,8 +276,8 @@ public:
      * @param f Function to execute on success
      * @return New AsyncOp for chained operation
      * 
-     * @warning Calling then() multiple times OVERWRITES previous callback!
-     * Only the LAST then() executes. Use tap() for side effects or chain properly.
+     * @warning Calling then() multiple times will be ignored.
+     * Only the FIRST then() executes. Use tap() for side effects or chain properly.
      */
     template<typename F>
     auto then(F&& f) -> AsyncOp<unwrap_async_op_t<typename std::invoke_result<F, T>::type>> {
@@ -327,7 +328,7 @@ public:
                 }
             };
         } else {
-            spdlog::debug("AsyncOp[{}] cannot overwrite then() callback", id());
+            spdlog::error("AsyncOp[{}] then() called but we cannot overwrite the success handler", id());
         }
 
         // Auto-propagate errors if no error handler
@@ -356,8 +357,33 @@ public:
     }
     
     /**
+     * @brief Set success handler
+     * @warning Calling onSuccess() multiple times will be ignored.
+     * @warning If not the last handler in chain, the next handler must be recover() or otherwise().
+     */
+    AsyncOp<T>& onSuccess(std::function<void(T)> handler) {
+        spdlog::trace("AsyncOp[{}] setting success handler", id());
+
+        if (m_promise->canOverwriteSuccessCallback()) {
+            // Set the flag to indicate this is not a propagation callback
+            m_promise->status_flags.success_cb_is_propagating = 0;
+            m_promise->success_cb = std::move(handler);
+        } else {
+            spdlog::error("AsyncOp[{}] cannot overwrite success handler", id());
+        }
+        if (isResolved()) {
+            add_idle([state = m_promise]() {
+                state->success_cb(std::move(state->result_value));
+                return false;
+            });
+        }
+        return *this;
+    }
+
+    /**
      * @brief Set error handler
-     * @warning Calling onError() multiple times OVERWRITES previous handler!
+     * @warning Calling onError() multiple times will be ignored.
+     * @warning If not the last handler in chain, the next handler must be then().
      */
     AsyncOp<T>& onError(std::function<void(ErrorCode)> handler) {
         spdlog::trace("AsyncOp[{}] setting error handler", id());
@@ -367,7 +393,7 @@ public:
             m_promise->status_flags.error_cb_is_propagating = 0;
             m_promise->error_cb = std::move(handler);
         } else {
-            spdlog::error("AsyncOp::onError: cannot set error callback after promise is resolved or rejected");
+            spdlog::error("AsyncOp[{}] cannot overwrite error handler", id());
         }
         if (isRejected()) {
             add_idle([state = m_promise]() {
@@ -421,8 +447,7 @@ public:
                         // Handler returns AsyncOp<T> - chain recovery operation
                         auto recovery_op = f(err);
                         recovery_op
-                            .then(
-                                [next_state](T value) mutable { next_state->resolveWith(std::move(value)); })
+                            .then([next_state](T value) mutable { next_state->resolveWith(std::move(value)); })
                             .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
                     } else {
                         // Handler returns T - recovery succeeded
@@ -441,7 +466,7 @@ public:
                 }
             };
         } else {
-            spdlog::error("recover(): cannot overwrite error callback");
+            spdlog::error("AsyncOp[{}] cannot overwrite error handler", id());
         }
 
         // Auto-propagate success - this is a pure propagation
@@ -539,7 +564,7 @@ public:
         using RetType = SuccessRetType;
         
         spdlog::trace("AsyncOp[{}] adding next() with dual handlers", id());
-        
+
         AsyncOp<RetType> next_op;
         auto next_state = next_op.m_promise;
         auto op_id = m_promise->op_id;
@@ -556,8 +581,7 @@ public:
                         auto result_op = success_handler(std::move(val));
                         result_op
                             .then([next_state](RetType value) mutable {
-                                next_state->resolveWith(std::move(value));
-                            })
+                                next_state->resolveWith(std::move(value)); })
                             .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
                     } else {
                         // Handler returns RetType
@@ -572,6 +596,8 @@ public:
                     next_state->rejectWith(ErrorCode::Exception);
                 }
             };
+        } else {
+            spdlog::error("AsyncOp[{}] cannot overwrite success handler", id());
         }
 
         if (m_promise->canOverwriteErrorCallback()) {
@@ -586,8 +612,7 @@ public:
                         auto result_op = error_handler(err);
                         result_op
                             .then([next_state](RetType value) mutable {
-                                next_state->resolveWith(std::move(value));
-                            })
+                                next_state->resolveWith(std::move(value)); })
                             .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
                     } else {
                         // Handler returns RetType
@@ -606,6 +631,8 @@ public:
                     next_state->rejectWith(ErrorCode::Exception);
                 }
             };
+        } else {
+            spdlog::error("AsyncOp[{}] cannot overwrite error handler", id());
         }
 
         // If already settled, execute immediately
@@ -727,6 +754,8 @@ public:
 
                 result_state->resolveWith(std::move(val));
             };
+        } else {
+            spdlog::error("AsyncOp[{}] cannot overwrite success handler", id());
         }
 
         if (m_promise->canOverwriteErrorCallback()) {
@@ -749,6 +778,8 @@ public:
 
                 result_state->rejectWith(err);
             };
+        } else {
+            spdlog::error("AsyncOp[{}] cannot overwrite error handler", id());
         }
 
         // Execute immediately if already settled
