@@ -1,4 +1,4 @@
-# AsyncOp Library v2.2 - Documentation
+# AsyncOp Library v2.3 - Documentation
 
 > **Lightweight Promise/Future pattern for embedded Linux with GLib or Qt**
 > 
@@ -1815,48 +1815,30 @@ ao::AsyncOp<Result> computeAsync() {
 
 ---
 
-## What's New in v2.2
+## What's New in v2.3
 
 ### Major Changes
 
-**✨ Promise/Future Semantics**
-- Added `Promise<T>` type alias for clearer API
-- Renamed internal `state_` to `m_promise` for semantic clarity
-- `AsyncOp` now clearly acts as Future (consumer)
-- `Promise<T>` clearly acts as Promise (producer)
+**✨ New onSuccess() Function**
+- Added `onSuccess()` terminal handler for success cases (similar to `onError()` but for success)
+- Provides symmetry for terminal success handling without continuing the chain
+- Follows same callback overwrite protection as other handlers
+- Includes proper chaining constraints documentation
 
-**🔧 ErrorCode Formatting**
-- Added fmt formatter for `ErrorCode` enum
-- Can now use `spdlog::error("Error: {}", err)` directly
-- No more `static_cast<int>(err)` needed
+**🔒 Enhanced Callback Protection**
+- Improved callback overwrite protection mechanism to prevent accidental overwrites
+- More informative error messages when callback overwrites are prevented
+- Consistent overwrite protection across all handler types (then, onSuccess, onError, etc.)
 
-**📚 Event Loop Abstraction**
-- Extracted event loop code to separate `ao_event_loop.hpp`
-- Cleaner separation of concerns
-- Easier to add new backends
+**📝 Documentation Improvements**
+- Comprehensive documentation for the new `onSuccess()` function
+- Added chaining rules and constraints section
+- Updated examples and API references to include the new functionality
+- Improved project structure and build configuration documentation
 
-### API Compatibility
-
-**No breaking changes** - all existing code continues to work:
-- `future.promise()` still returns the promise
-- `future.m_promise` also available for direct access
-- Both styles supported for transition period
-
-**Recommended migration:**
-```cpp
-// Old style (still works)
-auto state = op.state_;
-add_timeout(ms, [state]() { state->resolveWith(42); });
-
-// New style (recommended)
-auto promise = op.promise();
-add_timeout(ms, [promise]() { promise->resolveWith(42); });
-
-// Or direct member access
-add_timeout(ms, [promise = op.m_promise]() { 
-    promise->resolveWith(42); 
-});
-```
+**⚙️ Build System Updates**
+- Enhanced CMake configuration to better support both Qt5 and GLib backends
+- Better handling of optional Qt5 dependencies
 
 ---
 
@@ -1898,7 +1880,7 @@ The library uses CMake for build configuration with the following features:
 #### CMakeLists.txt
 ```cmake
 cmake_minimum_required(VERSION 3.10)
-project(AsyncOp VERSION 2.2 LANGUAGES CXX)
+project(AsyncOp VERSION 2.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -1958,7 +1940,7 @@ This configuration supports both GLib and Qt backends, with spdlog for logging a
 
 ## Summary
 
-**AsyncOp v2.2** provides production-ready Promise/Future semantics for embedded Linux:
+**AsyncOp v2.3** provides production-ready Promise/Future semantics for embedded Linux:
 
 ✅ **Clear Promise/Future model** - `AsyncOp<T>` = Future, `Promise<T>` = Promise
 ✅ **Powerful chaining** - `.then()`, `.recover()`, `.next()`, `.otherwise()`
