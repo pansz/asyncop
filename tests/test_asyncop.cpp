@@ -424,6 +424,63 @@ void testRecoverFrom()
             true);
 }
 
+void testRecoverBranching()
+{
+    std::cout << "\n=== Testing recover() Branching Feature ===" << std::endl;
+
+    // Test 1: Success path - recover() should NOT handle, but pass through
+    bool first_then_called = false;
+    bool error_path_called = false;
+    bool second_then_called = false;
+    int success_value = 0;
+
+    simulateComputation(10, 50)  // Will succeed with value 20
+        .then([&](int value) {
+            first_then_called = true;
+            success_value = value;
+            // Don't return anything - this creates AsyncOp<void>
+        })
+        .recover([&](ao::ErrorCode) {
+            // Should NOT be called - success doesn't need recovery
+            error_path_called = true;
+        })
+        .then([&]() {
+            // This should still be called via propagating success callback
+            second_then_called = true;
+        });
+
+    runEventLoopFor(150);
+
+    runTest("Branching: first then() called", true, first_then_called);
+    runTest("Branching: recover() NOT called on success", false, error_path_called);
+    runTest("Branching: second then() called via propagation", true, second_then_called);
+    runValueTest("Branching: success value captured", 20, success_value);
+
+    // Test 2: Error path - recover() SHOULD handle
+    bool then_skipped = true;  // Assume true, set false if then() called
+    bool recovery_called = false;
+    bool recovery_then_called = false;
+
+    simulateComputation(10, 50, true)  // Will fail
+        .then([&](int) {
+            // Should NOT be called
+            then_skipped = false;
+        })
+        .recover([&](ao::ErrorCode) {
+            recovery_called = true;
+            // Recovery handler for AsyncOp<void> returns void
+        })
+        .then([&]() {
+            recovery_then_called = true;
+        });
+
+    runEventLoopFor(150);
+
+    runTest("Branching: then() skipped on error", true, then_skipped);
+    runTest("Branching: recover() called on error", true, recovery_called);
+    runTest("Branching: then() after recover() called", true, recovery_then_called);
+}
+
 void testNext()
 {
     std::cout << "\n=== Testing next() (Both Paths, Same Type) ===" << std::endl;
@@ -1667,6 +1724,7 @@ int test_main_asyncop()
         testOtherwiseSuccessPropagation();
         testOrElse();
         testRecoverFrom();
+        testRecoverBranching();
         testNext();
         testNextErrorPath();
         testNextWithAsyncOp();
