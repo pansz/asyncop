@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.3.2] - 2026-02-25
+
+### Changed
+- Callback overwrite violations now trigger `assert()` in debug builds instead of only logging errors
+- Applies to `then()`, `onSuccess()`, `onError()`, `recover()`, `next()`, and `finally()` methods
+- Helps catch API misuse early during development (e.g., calling `then()` after `onSuccess()`)
+- Release builds with `NDEBUG` continue to log errors without asserting
+
 ## [2.3.1] - 2026-02-25
 
 ### Fixed

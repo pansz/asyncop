@@ -28,6 +28,7 @@
 #include <chrono>
 #include <vector>
 #include <utility>
+#include <cassert>
 
 // Event loop abstraction layer - Provides unified interface for scheduling timers,
 // idle callbacks, and main thread marshaling across different backends (GLib/Qt).
@@ -275,13 +276,14 @@ public:
     
     /**
      * @brief Chain operation to execute on success
-     * 
+     *
      * @tparam F Function type (T -> U or T -> AsyncOp<U>)
      * @param f Function to execute on success
      * @return New AsyncOp for chained operation
-     * 
+     *
      * @warning Calling then() multiple times will be ignored.
      * Only the FIRST then() executes. Use tap() for side effects or chain properly.
+     * @warning Calling then() after onSuccess() is a logic error.
      */
     template<typename F>
     auto then(F&& f) -> AsyncOp<unwrap_async_op_t<typename std::invoke_result<F, T>::type>> {
@@ -294,7 +296,10 @@ public:
         AsyncOp<RetType> next_op;
         auto next_state = next_op.m_promise;
 
-        if (m_promise->canOverwriteSuccessCallback()) {
+        if (!m_promise->canOverwriteSuccessCallback()) {
+            spdlog::error("AsyncOp[{}] then() called after terminal handler - callback ignored", id());
+            assert(false && "then() cannot overwrite existing non-propagating callback");
+        } else {
             // Set the new success callback (overwriting existing if present)
             m_promise->status_flags.success_cb_is_propagating = 0; // New callback is not propagation
             m_promise->success_cb = [f = std::forward<F>(f), next_state,
@@ -331,8 +336,6 @@ public:
                     next_state->rejectWith(ErrorCode::Exception);
                 }
             };
-        } else {
-            spdlog::error("AsyncOp[{}] then() called but we cannot overwrite the success handler", id());
         }
 
         // Auto-propagate errors if no error handler
@@ -344,7 +347,7 @@ public:
                 next_state->rejectWith(err);
             };
         }
-        
+
         // If already settled, execute via micro-async (add_idle)
         if (!isPending()) {
             add_idle([state = m_promise]() {
@@ -368,13 +371,14 @@ public:
     AsyncOp<T>& onSuccess(std::function<void(T)> handler) {
         spdlog::trace("AsyncOp[{}] setting success handler", id());
 
-        if (m_promise->canOverwriteSuccessCallback()) {
-            // Set the flag to indicate this is not a propagation callback
-            m_promise->status_flags.success_cb_is_propagating = 0;
-            m_promise->success_cb = std::move(handler);
-        } else {
-            spdlog::error("AsyncOp[{}] cannot overwrite success handler", id());
+        if (!m_promise->canOverwriteSuccessCallback()) {
+            spdlog::error("AsyncOp[{}] cannot overwrite success handler - onSuccess() called after terminal handler", id());
+            assert(false && "onSuccess() cannot overwrite existing non-propagating callback");
         }
+        // Set the flag to indicate this is not a propagation callback
+        m_promise->status_flags.success_cb_is_propagating = 0;
+        m_promise->success_cb = std::move(handler);
+
         if (isResolved()) {
             add_idle([state = m_promise]() {
                 state->success_cb(std::move(state->result_value));
@@ -392,13 +396,14 @@ public:
     AsyncOp<T>& onError(std::function<void(ErrorCode)> handler) {
         spdlog::trace("AsyncOp[{}] setting error handler", id());
 
-        if (m_promise->canOverwriteErrorCallback()) {
-            // Set the flag to indicate this is not a propagation callback
-            m_promise->status_flags.error_cb_is_propagating = 0;
-            m_promise->error_cb = std::move(handler);
-        } else {
-            spdlog::error("AsyncOp[{}] cannot overwrite error handler", id());
+        if (!m_promise->canOverwriteErrorCallback()) {
+            spdlog::error("AsyncOp[{}] cannot overwrite error handler - onError() called after terminal handler", id());
+            assert(false && "onError() cannot overwrite existing non-propagating callback");
         }
+        // Set the flag to indicate this is not a propagation callback
+        m_promise->status_flags.error_cb_is_propagating = 0;
+        m_promise->error_cb = std::move(handler);
+
         if (isRejected()) {
             add_idle([state = m_promise]() {
                 state->error_cb(state->getErrorCode());
@@ -439,12 +444,14 @@ public:
         auto next_state = next_op.m_promise;
         auto op_id = m_promise->op_id;
 
-        if (m_promise->canOverwriteErrorCallback()) {
+        if (!m_promise->canOverwriteErrorCallback()) {
+            spdlog::error("AsyncOp[{}] recover() called after terminal error handler", id());
+            assert(false && "recover() cannot overwrite existing non-propagating error callback");
+        }
+        // Set the error callback propagation flag to false (not a pure propagation, it's recovery)
+        m_promise->status_flags.error_cb_is_propagating = 0;
 
-            // Set the error callback propagation flag to false (not a pure propagation, it's recovery)
-            m_promise->status_flags.error_cb_is_propagating = 0;
-
-            m_promise->error_cb = [f = std::forward<F>(f), next_state, op_id](ErrorCode err) mutable {
+        m_promise->error_cb = [f = std::forward<F>(f), next_state, op_id](ErrorCode err) mutable {
                 spdlog::debug("AsyncOp[{}] executing recover() recovery", op_id);
                 try {
                     if constexpr (is_async_op_v<InvokeResult>) {
@@ -469,18 +476,17 @@ public:
                     next_state->rejectWith(ErrorCode::Exception);
                 }
             };
-        } else {
-            spdlog::error("AsyncOp[{}] cannot overwrite error handler", id());
-        }
 
         // Auto-propagate success - this is a pure propagation
-        if (m_promise->canOverwriteSuccessCallback()) {
-            m_promise->status_flags.success_cb_is_propagating = 1; // Set propagation flag to true
-            m_promise->success_cb = [next_state, op_id](T val) mutable {
-                spdlog::debug("AsyncOp[{}] propagating success through recover()", op_id);
-                next_state->resolveWith(std::move(val));
-            };
+        if (!m_promise->canOverwriteSuccessCallback()) {
+            spdlog::error("AsyncOp[{}] recover() cannot propagate success - internal logic error", id());
+            assert(false && "recover() cannot overwrite success callback for propagation");
         }
+        m_promise->status_flags.success_cb_is_propagating = 1;
+        m_promise->success_cb = [next_state, op_id](T val) mutable {
+            spdlog::debug("AsyncOp[{}] propagating success through recover()", op_id);
+            next_state->resolveWith(std::move(val));
+        };
         
         // If already settled, execute immediately
         if (!isPending()) {
@@ -573,71 +579,71 @@ public:
         auto next_state = next_op.m_promise;
         auto op_id = m_promise->op_id;
 
-        if (m_promise->canOverwriteSuccessCallback()) {
-            m_promise->status_flags.success_cb_is_propagating = 0;
-            // Set success handler
-            m_promise->success_cb = [success_handler = std::forward<SuccessF>(success_handler), next_state,
-                                     op_id](T val) mutable {
-                spdlog::debug("AsyncOp[{}] executing next() success handler", op_id);
-                try {
-                    if constexpr (is_async_op_v<SuccessInvokeResult>) {
-                        // Handler returns AsyncOp<RetType>
-                        auto result_op = success_handler(std::move(val));
-                        result_op
-                            .then([next_state](RetType value) mutable {
-                                next_state->resolveWith(std::move(value)); })
-                            .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
-                    } else {
-                        // Handler returns RetType
-                        RetType result = success_handler(std::move(val));
-                        next_state->resolveWith(std::move(result));
-                    }
-                } catch (const std::exception &e) {
-                    spdlog::error("AsyncOp[{}] exception in next() success handler: {}", op_id, e.what());
-                    next_state->rejectWith(ErrorCode::Exception);
-                } catch (...) {
-                    spdlog::error("AsyncOp[{}] unknown exception in next() success handler", op_id);
-                    next_state->rejectWith(ErrorCode::Exception);
-                }
-            };
-        } else {
-            spdlog::error("AsyncOp[{}] cannot overwrite success handler", id());
+        if (!m_promise->canOverwriteSuccessCallback()) {
+            spdlog::error("AsyncOp[{}] next() called after terminal success handler", id());
+            assert(false && "next() cannot overwrite existing non-propagating success callback");
         }
+        m_promise->status_flags.success_cb_is_propagating = 0;
+        // Set success handler
+        m_promise->success_cb = [success_handler = std::forward<SuccessF>(success_handler), next_state,
+                                 op_id](T val) mutable {
+            spdlog::debug("AsyncOp[{}] executing next() success handler", op_id);
+            try {
+                if constexpr (is_async_op_v<SuccessInvokeResult>) {
+                    // Handler returns AsyncOp<RetType>
+                    auto result_op = success_handler(std::move(val));
+                    result_op
+                        .then([next_state](RetType value) mutable {
+                            next_state->resolveWith(std::move(value)); })
+                        .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                } else {
+                    // Handler returns RetType
+                    RetType result = success_handler(std::move(val));
+                    next_state->resolveWith(std::move(result));
+                }
+            } catch (const std::exception &e) {
+                spdlog::error("AsyncOp[{}] exception in next() success handler: {}", op_id, e.what());
+                next_state->rejectWith(ErrorCode::Exception);
+            } catch (...) {
+                spdlog::error("AsyncOp[{}] unknown exception in next() success handler", op_id);
+                next_state->rejectWith(ErrorCode::Exception);
+            }
+        };
 
-        if (m_promise->canOverwriteErrorCallback()) {
-            m_promise->status_flags.error_cb_is_propagating = 0;
-            // Set error handler
-            m_promise->error_cb = [error_handler = std::forward<ErrorF>(error_handler), next_state,
-                                   op_id](ErrorCode err) mutable {
-                spdlog::debug("AsyncOp[{}] executing next() error handler", op_id);
-                try {
-                    if constexpr (is_async_op_v<ErrorInvokeResult>) {
-                        // Handler returns AsyncOp<RetType>
-                        auto result_op = error_handler(err);
-                        result_op
-                            .then([next_state](RetType value) mutable {
-                                next_state->resolveWith(std::move(value)); })
-                            .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
-                    } else {
-                        // Handler returns RetType
-                        RetType result = error_handler(err);
-                        next_state->resolveWith(std::move(result));
-                    }
-                } catch (const ErrorCode &e) {
-                    // Re-thrown ErrorCode
-                    spdlog::debug("AsyncOp[{}] next() error handler re-threw error {}", op_id, e);
-                    next_state->rejectWith(e);
-                } catch (const std::exception &e) {
-                    spdlog::error("AsyncOp[{}] exception in next() error handler: {}", op_id, e.what());
-                    next_state->rejectWith(ErrorCode::Exception);
-                } catch (...) {
-                    spdlog::error("AsyncOp[{}] unknown exception in next() error handler", op_id);
-                    next_state->rejectWith(ErrorCode::Exception);
-                }
-            };
-        } else {
-            spdlog::error("AsyncOp[{}] cannot overwrite error handler", id());
+        if (!m_promise->canOverwriteErrorCallback()) {
+            spdlog::error("AsyncOp[{}] next() called after terminal error handler", id());
+            assert(false && "next() cannot overwrite existing non-propagating error callback");
         }
+        m_promise->status_flags.error_cb_is_propagating = 0;
+        // Set error handler
+        m_promise->error_cb = [error_handler = std::forward<ErrorF>(error_handler), next_state,
+                               op_id](ErrorCode err) mutable {
+            spdlog::debug("AsyncOp[{}] executing next() error handler", op_id);
+            try {
+                if constexpr (is_async_op_v<ErrorInvokeResult>) {
+                    // Handler returns AsyncOp<RetType>
+                    auto result_op = error_handler(err);
+                    result_op
+                        .then([next_state](RetType value) mutable {
+                            next_state->resolveWith(std::move(value)); })
+                        .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                } else {
+                    // Handler returns RetType
+                    RetType result = error_handler(err);
+                    next_state->resolveWith(std::move(result));
+                }
+            } catch (const ErrorCode &e) {
+                // Re-thrown ErrorCode
+                spdlog::debug("AsyncOp[{}] next() error handler re-threw error {}", op_id, e);
+                next_state->rejectWith(e);
+            } catch (const std::exception &e) {
+                spdlog::error("AsyncOp[{}] exception in next() error handler: {}", op_id, e.what());
+                next_state->rejectWith(ErrorCode::Exception);
+            } catch (...) {
+                spdlog::error("AsyncOp[{}] unknown exception in next() error handler", op_id);
+                next_state->rejectWith(ErrorCode::Exception);
+            }
+        };
 
         // If already settled, execute immediately
         if (!isPending()) {
@@ -738,53 +744,53 @@ public:
         auto cleanup = std::make_shared<F>(std::forward<F>(cleanup_fn));
         auto cleanup_done = std::make_shared<bool>(false);
 
-        if (m_promise->canOverwriteSuccessCallback()) {
-            m_promise->status_flags.success_cb_is_propagating = 0;
-            // Success path: cleanup then propagate value
-            m_promise->success_cb = [cleanup, cleanup_done, result_state,
-                                     op_id = m_promise->op_id](T val) mutable {
-                spdlog::debug("AsyncOp[{}] executing finally (success)", op_id);
-
-                if (!*cleanup_done) {
-                    *cleanup_done = true;
-                    try {
-                        (*cleanup)();
-                    } catch (const std::exception &e) {
-                        spdlog::error("Exception in finally(): {}", e.what());
-                    } catch (...) {
-                        spdlog::error("Unknown exception in finally()");
-                    }
-                }
-
-                result_state->resolveWith(std::move(val));
-            };
-        } else {
-            spdlog::error("AsyncOp[{}] cannot overwrite success handler", id());
+        if (!m_promise->canOverwriteSuccessCallback()) {
+            spdlog::error("AsyncOp[{}] finally() called after terminal success handler", id());
+            assert(false && "finally() cannot overwrite existing non-propagating success callback");
         }
+        m_promise->status_flags.success_cb_is_propagating = 0;
+        // Success path: cleanup then propagate value
+        m_promise->success_cb = [cleanup, cleanup_done, result_state,
+                                 op_id = m_promise->op_id](T val) mutable {
+            spdlog::debug("AsyncOp[{}] executing finally (success)", op_id);
 
-        if (m_promise->canOverwriteErrorCallback()) {
-            m_promise->status_flags.error_cb_is_propagating = 0;
-            // Error path: cleanup then propagate error
-            m_promise->error_cb = [cleanup, cleanup_done, result_state,
-                                   op_id = m_promise->op_id](ErrorCode err) mutable {
-                spdlog::debug("AsyncOp[{}] executing finally (error)", op_id);
-
-                if (!*cleanup_done) {
-                    *cleanup_done = true;
-                    try {
-                        (*cleanup)();
-                    } catch (const std::exception &e) {
-                        spdlog::error("Exception in finally(): {}", e.what());
-                    } catch (...) {
-                        spdlog::error("Unknown exception in finally()");
-                    }
+            if (!*cleanup_done) {
+                *cleanup_done = true;
+                try {
+                    (*cleanup)();
+                } catch (const std::exception &e) {
+                    spdlog::error("Exception in finally(): {}", e.what());
+                } catch (...) {
+                    spdlog::error("Unknown exception in finally()");
                 }
+            }
 
-                result_state->rejectWith(err);
-            };
-        } else {
-            spdlog::error("AsyncOp[{}] cannot overwrite error handler", id());
+            result_state->resolveWith(std::move(val));
+        };
+
+        if (!m_promise->canOverwriteErrorCallback()) {
+            spdlog::error("AsyncOp[{}] finally() called after terminal error handler", id());
+            assert(false && "finally() cannot overwrite existing non-propagating error callback");
         }
+        m_promise->status_flags.error_cb_is_propagating = 0;
+        // Error path: cleanup then propagate error
+        m_promise->error_cb = [cleanup, cleanup_done, result_state,
+                               op_id = m_promise->op_id](ErrorCode err) mutable {
+            spdlog::debug("AsyncOp[{}] executing finally (error)", op_id);
+
+            if (!*cleanup_done) {
+                *cleanup_done = true;
+                try {
+                    (*cleanup)();
+                } catch (const std::exception &e) {
+                    spdlog::error("Exception in finally(): {}", e.what());
+                } catch (...) {
+                    spdlog::error("Unknown exception in finally()");
+                }
+            }
+
+            result_state->rejectWith(err);
+        };
 
         // Execute immediately if already settled
         if (isResolved() && m_promise->success_cb) {
