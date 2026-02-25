@@ -68,7 +68,7 @@ namespace ao {
 class IdGen {
 private:
     std::atomic<int64_t> last_timestamp_ms_{0};
-    std::atomic<int64_t> global_counter_{0};  // Continuous counter across time periods
+    std::atomic<int32_t> global_counter_{0};  // Continuous counter across time periods
 
     // Counter uses 22 bits (0 to 4,194,303)
     static constexpr int32_t COUNTER_BITS = 22;
