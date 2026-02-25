@@ -1,6 +1,15 @@
 # Changelog
 
-## [Unreleased]
+## [2.3.1] - 2026-02-25
+
+### Fixed
+- **Critical race conditions in parallel batch operations** - Fixed thread safety issues in `all()`, `race()`, `any()`, and `allSettled()` functions
+  - Changed shared counters from `std::shared_ptr<size_t>` to `std::shared_ptr<std::atomic<size_t>>`
+  - Changed shared flags from `std::shared_ptr<bool>` to `std::shared_ptr<std::atomic<bool>>`
+  - Used proper atomic operations (`fetch_add`, `compare_exchange_strong`) with appropriate memory ordering
+  - Prevents undefined behavior when multiple callbacks complete concurrently
+
+## [2.3.0] - 2026-02-25
 
 ### Added
 - `onSuccess()` function for terminal success handling (similar to `onError()` but for success cases)
@@ -15,9 +24,20 @@
 - Enhanced build configuration to support both Qt5 and GLib backends properly
 - Updated project structure documentation to match actual directory layout
 - Changed warning levels from `debug`/`warn` to `error` for overwrite protection violations
+- Bumped version from 2.2 to 2.3
 
 ### Fixed
 - Corrected member variable ordering in State struct for better memory layout
 - Fixed issue where settled operations wouldn't execute callbacks immediately
 - Improved error handling in documentation examples
 - Removed meta-instructions from documentation that were meant for internal use only
+
+## [2.2.0] - 2026-02-13
+
+### Added
+- Initial release of AsyncOp library
+- Promise/Future pattern for embedded Linux systems
+- Support for both GLib and Qt event loops
+- Message registry for request/response patterns
+- Comprehensive test suite
+- Examples for callback conversion

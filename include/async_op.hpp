@@ -4,7 +4,7 @@
  * @author pansz
  * @date 2026.2.8
  * 
- * AsyncOp 2.2
+ * AsyncOp 2.3
  * 
  * Promise/Future-like pattern for chaining async I/O operations. Eliminates callback hell
  * and improves code readability. Designed for embedded systems with moderate memory constraints.
@@ -1188,43 +1188,43 @@ AsyncOp<T> pollUntil(F&& operation, Pred&& condition, int max_attempts,
 template<typename T>
 AsyncOp<std::vector<T>> all(std::vector<AsyncOp<T>> operations) {
     spdlog::debug("all() waiting for {} operations", operations.size());
-    
+
     AsyncOp<std::vector<T>> result;
     auto result_state = result.m_promise;
     auto results = std::make_shared<std::vector<T>>();
-    auto completed = std::make_shared<size_t>(0);
-    auto failed = std::make_shared<bool>(false);
+    auto completed = std::make_shared<std::atomic<size_t>>(0);
+    auto failed = std::make_shared<std::atomic<bool>>(false);
     auto total = operations.size();
-    
+
     if (total == 0) {
         spdlog::debug("all() called with 0 operations");
         return AsyncOp<std::vector<T>>::resolved(std::vector<T>{});
     }
-    
+
     results->resize(total);
-    
+
     for (size_t i = 0; i < total; ++i) {
         operations[i].then([=, index = i](T value) {
-            if (*failed) return;
-            
+            if (failed->load(std::memory_order_relaxed)) return;
+
             (*results)[index] = std::move(value);
-            (*completed)++;
-            
-            spdlog::trace("all() operation {}/{} completed", *completed, total);
-            
-            if (*completed == total) {
+            size_t count = completed->fetch_add(1, std::memory_order_acq_rel) + 1;
+
+            spdlog::trace("all() operation {}/{} completed", count, total);
+
+            if (count == total) {
                 spdlog::info("all() completed successfully", total);
                 result_state->resolveWith(std::move(*results));
             }
         }).onError([=](ErrorCode err) {
-            if (!*failed) {
-                *failed = true;
+            bool expected = false;
+            if (failed->compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
                 spdlog::error("all() operation failed with err {}, failing batch", err);
                 result_state->rejectWith(err);
             }
         });
     }
-    
+
     return result;
 }
 
@@ -1239,33 +1239,33 @@ AsyncOp<std::vector<T>> all(std::vector<AsyncOp<T>> operations) {
 template<typename T>
 AsyncOp<T> race(std::vector<AsyncOp<T>> operations) {
     spdlog::debug("race() racing {} operations (first to settle wins)", operations.size());
-    
+
     AsyncOp<T> result;
     auto result_state = result.m_promise;
-    auto completed = std::make_shared<bool>(false);
+    auto completed = std::make_shared<std::atomic<bool>>(false);
     auto total = operations.size();
-    
+
     if (total == 0) {
         spdlog::warn("race() called with 0 operations");
         return AsyncOp<T>::rejected(ErrorCode::InvalidResponse);
     }
-    
+
     for (size_t i = 0; i < total; ++i) {
         operations[i].then([=, index = i](T value) {
-            if (!*completed) {
-                *completed = true;
+            bool expected = false;
+            if (completed->compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
                 spdlog::info("race() operation {} won (success)", index);
                 result_state->resolveWith(std::move(value));
             }
         }).onError([=, index = i](ErrorCode err) {
-            if (!*completed) {
-                *completed = true;
+            bool expected = false;
+            if (completed->compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
                 spdlog::info("race() operation {} won (failure)", index);
                 result_state->rejectWith(err);
             }
         });
     }
-    
+
     return result;
 }
 
@@ -1281,37 +1281,40 @@ AsyncOp<T> race(std::vector<AsyncOp<T>> operations) {
 template<typename T>
 AsyncOp<T> any(std::vector<AsyncOp<T>> operations) {
     spdlog::debug("any() racing {} operations (first success wins)", operations.size());
-    
+
     AsyncOp<T> result;
     auto result_state = result.m_promise;
-    auto completed = std::make_shared<bool>(false);
-    auto failed_count = std::make_shared<size_t>(0);
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+    auto failed_count = std::make_shared<std::atomic<size_t>>(0);
     auto total = operations.size();
-    
+
     if (total == 0) {
         spdlog::warn("any() called with 0 operations");
         return AsyncOp<T>::rejected(ErrorCode::InvalidResponse);
     }
-    
+
     for (size_t i = 0; i < total; ++i) {
         operations[i].then([=, index = i](T value) {
-            if (!*completed) {
-                *completed = true;
+            bool expected = false;
+            if (completed->compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
                 spdlog::info("any() operation {} won", index);
                 result_state->resolveWith(std::move(value));
             }
         }).onError([=, index = i](ErrorCode err) {
-            (*failed_count)++;
-            spdlog::debug("any() operation {} failed, {}/{} failed", 
-                         index, *failed_count, total);
-            
-            if (*failed_count == total && !*completed) {
-                spdlog::error("any() all operations failed");
-                result_state->rejectWith(err);
+            size_t count = failed_count->fetch_add(1, std::memory_order_acq_rel) + 1;
+            spdlog::debug("any() operation {} failed, {}/{} failed",
+                         index, count, total);
+
+            if (count == total) {
+                bool already_completed = completed->load(std::memory_order_acquire);
+                if (!already_completed) {
+                    spdlog::error("any() all operations failed");
+                    result_state->rejectWith(err);
+                }
             }
         });
     }
-    
+
     return result;
 }
 
@@ -1383,46 +1386,46 @@ auto defer(F&& f) -> AsyncOp<typename std::invoke_result<F>::type> {
 template<typename T>
 AsyncOp<std::vector<SettledResult<T>>> allSettled(std::vector<AsyncOp<T>> operations) {
     spdlog::debug("allSettled() waiting for {} operations", operations.size());
-    
+
     AsyncOp<std::vector<SettledResult<T>>> result;
     auto result_state = result.m_promise;
     auto results = std::make_shared<std::vector<SettledResult<T>>>();
-    auto completed = std::make_shared<size_t>(0);
+    auto completed = std::make_shared<std::atomic<size_t>>(0);
     auto total = operations.size();
-    
+
     if (total == 0) {
         spdlog::debug("allSettled() called with 0 operations");
         return AsyncOp<std::vector<SettledResult<T>>>::resolved(std::vector<SettledResult<T>>{});
     }
-    
+
     results->resize(total);
-    
+
     for (size_t i = 0; i < total; ++i) {
         operations[i].then([=, index = i](T value) {
             (*results)[index].status = SettledResult<T>::Fulfilled;
             (*results)[index].value = std::move(value);
-            (*completed)++;
-            
-            spdlog::trace("allSettled() operation {}/{} fulfilled", *completed, total);
-            
-            if (*completed == total) {
+            size_t count = completed->fetch_add(1, std::memory_order_acq_rel) + 1;
+
+            spdlog::trace("allSettled() operation {}/{} fulfilled", count, total);
+
+            if (count == total) {
                 spdlog::info("allSettled() all {} operations settled", total);
                 result_state->resolveWith(std::move(*results));
             }
         }).onError([=, index = i](ErrorCode err) {
             (*results)[index].status = SettledResult<T>::Rejected;
             (*results)[index].error = err;
-            (*completed)++;
-            
-            spdlog::trace("allSettled() operation {}/{} rejected", *completed, total);
-            
-            if (*completed == total) {
+            size_t count = completed->fetch_add(1, std::memory_order_acq_rel) + 1;
+
+            spdlog::trace("allSettled() operation {}/{} rejected", count, total);
+
+            if (count == total) {
                 spdlog::info("allSettled() all {} operations settled", total);
                 result_state->resolveWith(std::move(*results));
             }
         });
     }
-    
+
     return result;
 }
 
