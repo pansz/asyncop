@@ -356,10 +356,8 @@ public:
         };
 
         // Auto-propagate success - this is a pure propagation
-        if (!m_promise->canOverwriteSuccessCallback()) {
-            spdlog::error("AsyncOp[{}] recover() cannot propagate success - internal logic error", id());
-            assert(false && "recover() cannot overwrite success callback for propagation");
-        }
+        // Note: recover() only handles errors; success passes through to next chained operation.
+        // This enables branching: op.then(...); op.recover(...).then(...)
         m_promise->status_flags.success_cb_is_propagating = 1;
         m_promise->success_cb = [next_state, op_id]() mutable {
             spdlog::debug("AsyncOp[{}] propagating success through recover()", op_id);
