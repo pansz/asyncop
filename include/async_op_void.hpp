@@ -358,11 +358,15 @@ public:
         // Auto-propagate success - this is a pure propagation
         // Note: recover() only handles errors; success passes through to next chained operation.
         // This enables branching: op.then(...); op.recover(...).then(...)
-        m_promise->status_flags.success_cb_is_propagating = 1;
-        m_promise->success_cb = [next_state, op_id]() mutable {
-            spdlog::debug("AsyncOp[{}] propagating success through recover()", op_id);
-            next_state->resolveWith();
-        };
+        if (m_promise->canOverwriteSuccessCallback()) {
+            m_promise->status_flags.success_cb_is_propagating = 1;
+            m_promise->success_cb = [next_state, op_id]() mutable {
+                spdlog::debug("AsyncOp[{}] propagating success through recover()", op_id);
+                next_state->resolveWith();
+            };
+        }
+        // If canOverwriteSuccessCallback() returns false, it's not a problem since this
+        // is just the default propagating callback and an existing terminal handler is already set.
         
         // If already settled, execute immediately
         if (!isPending()) {
