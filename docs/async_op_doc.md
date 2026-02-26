@@ -454,6 +454,49 @@ fetchFromServer()
     });
 ```
 
+**⚠️ IMPORTANT: Timer starts immediately when `timeout()` is called**, not when the previous operation completes.
+
+```cpp
+// Timeout applies to BOTH op1 AND op2 combined (timer starts immediately when timeout() is called)
+// Total time from op1 start through op2 completion must be < 3000ms
+op1().then([](){ return op2(); }).timeout(3000ms);
+
+// Timeout applies ONLY to op2 (timer starts when op2's chain is set up)
+// op1 can take any amount of time; op2 must complete within 3000ms of starting
+op1().then([](){ return op2().timeout(3000ms); });
+```
+
+**Timeline visualization:**
+
+```
+// Case 1: .then().timeout() - timer covers entire chain
+op1().then([](){ return op2(); }).timeout(3000ms)
+
+Timeline:
+|-- op1 starts
+|   timeout() called, timer starts NOW ⏱️
+|--- op1 completes (500ms elapsed)
+|       .then() callback runs, op2 starts
+|------- op2 completes (800ms total) ✓ Success (under 3000ms)
+
+If op1 takes 2500ms and op2 takes 1000ms:
+|-- op1 starts
+|   timeout() called, timer starts ⏱️
+|----- op1 completes (2500ms elapsed)
+|         .then() callback runs, op2 starts
+|----------- TIMEOUT fires at 3000ms! ✗ op2 cancelled
+
+
+// Case 2: .then(op2().timeout()) - timer covers only inner operation
+op1().then([](){ return op2().timeout(3000ms); })
+
+Timeline:
+|-- op1 starts
+|--- op1 completes (could be 10 seconds, no timeout yet)
+|       op2().timeout() called, timer starts NOW ⏱️
+|--------- op2 completes (500ms) ✓ Success
+```
+
 #### tap()
 
 Execute side effects without modifying the value:

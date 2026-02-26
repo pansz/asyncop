@@ -667,6 +667,18 @@ public:
      * 
      * @param duration Timeout duration
      * @return New AsyncOp with timeout applied
+     * 
+     * **IMPORTANT: Timer starts immediately when timeout() is called**, not when
+     * the previous operation completes. The timeout covers all operations in the
+     * chain from the point where timeout() is called.
+     * 
+     * @code
+     * // Timeout applies to both op1 AND op2 combined (timer starts immediately)
+     * op1().then([](){ return op2(); }).timeout(3000ms);
+     * 
+     * // Timeout applies only to op2 (timer starts when op2's chain is set up)
+     * op1().then([](){ return op2().timeout(3000ms); });
+     * @endcode
      */
     AsyncOp<T> timeout(std::chrono::milliseconds duration) {
         spdlog::debug("AsyncOp[{}] setting timeout of {}ms", id(), duration.count());
