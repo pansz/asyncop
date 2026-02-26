@@ -21,3 +21,6 @@ Thumbs.db
 
 # Package manager
 node_modules/
+
+# Claude Code
+CLAUDE.md
