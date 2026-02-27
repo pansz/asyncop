@@ -1088,11 +1088,11 @@ AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& pr
 template<typename T>
 struct SettledResult {
     enum Status { Fulfilled, Rejected };
-    
-    Status status;
+
     T value;              // Valid only if Fulfilled
     ErrorCode error;      // Valid only if Rejected
-    
+    Status status;
+
     bool isFulfilled() const { return status == Fulfilled; }
     bool isRejected() const { return status == Rejected; }
 };
