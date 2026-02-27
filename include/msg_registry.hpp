@@ -51,10 +51,10 @@ namespace ao {
 /**
  * @brief Generate unique message IDs using timestamp + continuous counter
  *
- * ID Format: [timestamp_ms (41 bits) | counter (22 bits)]
+ * ID Format: [timestamp_ms (42 bits) | counter (21 bits)]
  * - Bit 63: Always 0 (ensures positive signed value)
- * - Bits 62-22: Timestamp in milliseconds (41 bits = ~69 years from epoch)
- * - Bits 21-0: Counter (22 bits = 4,194,304 IDs per millisecond)
+ * - Bits 62-21: Timestamp in milliseconds (42 bits = ~139 years from epoch)
+ * - Bits 20-0: Counter (21 bits = 2,097,152 IDs per millisecond)
  *
  * Properties:
  * - IDs are always positive (Java long compatibility)
@@ -62,6 +62,7 @@ namespace ao {
  * - Monotonically increasing globally by using continuous counter
  * - No persistence needed
  * - Handles clock skew gracefully by using continuous counter increment
+ * - Timestamp valid until year 2109
  *
  * Thread-safe: Yes (uses atomics)
  */
@@ -70,13 +71,13 @@ private:
     std::atomic<int64_t> last_timestamp_ms_{0};
     std::atomic<int32_t> global_counter_{0};  // Continuous counter across time periods
 
-    // Counter uses 22 bits (0 to 4,194,303)
-    static constexpr int32_t COUNTER_BITS = 22;
-    static constexpr int32_t COUNTER_MASK = (1 << COUNTER_BITS) - 1;  // 0x3FFFFF
+    // Counter uses 21 bits (0 to 2,097,151)
+    static constexpr int32_t COUNTER_BITS = 21;
+    static constexpr int32_t COUNTER_MASK = (1 << COUNTER_BITS) - 1;  // 0x1FFFFF
 
-    // Timestamp uses 41 bits (milliseconds since epoch)
-    static constexpr int32_t TIMESTAMP_BITS = 41;
-    static constexpr int64_t TIMESTAMP_MASK = (1LL << TIMESTAMP_BITS) - 1;  // 0x1FFFFFFFFFF
+    // Timestamp uses 42 bits (milliseconds since epoch)
+    static constexpr int32_t TIMESTAMP_BITS = 42;
+    static constexpr int64_t TIMESTAMP_MASK = (1LL << TIMESTAMP_BITS) - 1;  // 0x3FFFFFFFFFF
 
 public:
     /**
