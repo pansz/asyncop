@@ -963,35 +963,20 @@ public:
      * @param errorFilter Filter for error path. Return value to recover, throw to propagate.
      * @return New AsyncOp<T> with filtering applied
      *
-     * Move semantics: Value is moved into callback. User controls return copy/move:
-     * @code
-     * // Move on return (avoid copy)
-     * op.filterSuccess([](User& u) -> User {
-     *     if (!u.isValid()) throw ErrorCode::InvalidResponse;
-     *     return std::move(u);
-     * });
-     *
-     * // Copy on return (input was const ref)
-     * op.filterSuccess([](const User& u) -> User {
-     *     if (!u.isValid()) throw ErrorCode::InvalidResponse;
-     *     return u;
-     * });
-     * @endcode
-     *
      * @note For single-path filtering, use filterSuccess() or filterError() for clearer intent.
      *
      * @code
-     * // Success filter only (errors propagate unchanged)
-     * op.filterSuccess([](User& u) -> User {
-     *     if (!u.isValid()) throw ErrorCode::InvalidResponse;
-     *     return std::move(u);
-     * });
-     *
-     * // Error filter only (success propagates unchanged)
-     * op.filterError([](ErrorCode err) -> User {
-     *     if (err == ErrorCode::Timeout) return defaultUser;
-     *     throw err;  // propagate other errors
-     * });
+     * // Both filters: validate success AND recover from errors
+     * op.filter(
+     *     [](User& u) -> User {
+     *         if (!u.isValid()) throw ErrorCode::InvalidResponse;
+     *         return std::move(u);
+     *     },
+     *     [](ErrorCode err) -> User {
+     *         if (err == ErrorCode::Timeout) return getDefaultUser();
+     *         throw err;  // propagate other errors
+     *     }
+     * );
      * @endcode
      */
     template<typename SuccessF, typename ErrorF>

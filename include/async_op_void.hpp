@@ -815,16 +815,16 @@ public:
      * @note For single-path filtering, use filterSuccess() or filterError() for clearer intent.
      *
      * @code
-     * // Success filter only (errors propagate unchanged)
-     * op.filterSuccess([]() {
-     *     if (!conditionMet()) throw ErrorCode::InvalidResponse;
-     * });
-     *
-     * // Error filter only (success propagates unchanged)
-     * op.filterError([](ErrorCode err) {
-     *     if (err == ErrorCode::Timeout) return;  // recover
-     *     throw err;  // propagate other errors
-     * });
+     * // Both filters: validate success AND recover from errors
+     * op.filter(
+     *     []() {
+     *         if (!conditionMet()) throw ErrorCode::InvalidResponse;
+     *     },
+     *     [](ErrorCode err) {
+     *         if (err == ErrorCode::Timeout) return;  // recover
+     *         throw err;  // propagate other errors
+     *     }
+     * );
      * @endcode
      */
     template<typename SuccessF, typename ErrorF>
