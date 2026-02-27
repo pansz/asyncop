@@ -4,7 +4,7 @@
  * @author pansz
  * @date 2026.2.8
  *
- * AsyncOp 2.4
+ * AsyncOp 2.4.1
  *
  * Promise/Future-like pattern for chaining async I/O operations. Eliminates callback hell
  * and improves code readability. Designed for embedded systems with moderate memory constraints.
@@ -17,6 +17,12 @@
  * @note See async_op_doc.md for comprehensive usage guide
  * @note Requires ao_event_loop.hpp, spdlog
  * @note C++17 or later
+ *
+ * v2.4.1 Changes:
+ * - Added: filterSuccess() - Convenience wrapper for success-only filtering
+ * - Added: filterError() - Convenience wrapper for error-only filtering
+ * - Fixed: next() nullptr handling with dependent static_assert
+ * - Updated: filter() documentation to feature new convenience wrappers
  *
  * v2.4 Changes:
  * - Added: cancel() - Reject pending operations with configurable error code

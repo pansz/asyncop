@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.4.1] - 2026-02-27
+
+### Added
+- `filterSuccess()` - Convenience wrapper for success-only filtering
+- `filterError()` - Convenience wrapper for error-only filtering
+- Both wrappers provide clearer intent than `filter()` with `nullptr`
+
+### Changed
+- Updated `filter()` documentation to feature `filterSuccess()` and `filterError()`
+- Updated `recoverFrom()` deprecation notice to reference `filterError()`
+- Updated examples to use `filterError()` instead of `filter(nullptr, ...)`
+- Suppressed deprecation warnings in tests for deprecated API coverage
+
+### Fixed
+- `next()` nullptr handling - Changed `static_assert(false, ...)` to `static_assert(dependent_false_v<T>, ...)` to allow proper `if constexpr` branch compilation
+
 ## [2.4.0] - 2026-02-27
 
 ### Added

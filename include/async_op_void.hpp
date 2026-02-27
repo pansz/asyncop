@@ -27,7 +27,7 @@ namespace ao {
  *
  * @note CRITICAL: Always capture asyncOp.promise() (not AsyncOp itself) in callbacks
  *
- * @since AsyncOp 2.4
+ * @since AsyncOp 2.4.1
  */
 template<>
 class AsyncOp<void> {

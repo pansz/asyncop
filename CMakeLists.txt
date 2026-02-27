@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(AsyncOp VERSION 2.3 LANGUAGES CXX)
+project(AsyncOp VERSION 2.4.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -1,4 +1,4 @@
-# AsyncOp Library v2.4 - Documentation
+# AsyncOp Library v2.4.1 - Documentation
 
 > **Lightweight Promise/Future pattern for embedded Linux with GLib or Qt**
 > 
@@ -2037,6 +2037,25 @@ ao::AsyncOp<Result> computeAsync() {
 
 ---
 
+## What's New in v2.4.1
+
+### Major Changes
+
+**✨ New Convenience Wrappers for filter()**
+
+- Added `filterSuccess()` - Wrapper for success-only filtering (errors propagate unchanged)
+- Added `filterError()` - Wrapper for error-only filtering (success propagates unchanged)
+- Provides clearer intent than `filter(nullptr, ...)` pattern
+- `nullptr` pattern is now internal implementation detail, not documented public API
+
+**🔧 Bug Fixes**
+
+- Fixed `next()` nullptr handling - Changed `static_assert(false, ...)` to `static_assert(dependent_false_v<T>, ...)` to allow proper `if constexpr` branch compilation
+- Updated `recoverFrom()` deprecation to reference `filterError()`
+- Added deprecation warning suppression for tests covering deprecated APIs
+
+---
+
 ## What's New in v2.3
 
 ### Major Changes
@@ -2102,7 +2121,7 @@ The library uses CMake for build configuration with the following features:
 #### CMakeLists.txt
 ```cmake
 cmake_minimum_required(VERSION 3.10)
-project(AsyncOp VERSION 2.3 LANGUAGES CXX)
+project(AsyncOp VERSION 2.4.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
