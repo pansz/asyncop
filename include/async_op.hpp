@@ -1257,6 +1257,28 @@ AsyncOp<T> retryWithBackoff(F&& operation, int max_attempts,
 }
 
 /**
+ * @brief Retry operation immediately with no delay between attempts
+ *
+ * Convenience wrapper for retryWithBackoff() with zero initial delay.
+ * All retry attempts happen immediately without any delay.
+ *
+ * Timeline with max_attempts=3:
+ * - Attempt 1: immediate
+ * - Attempt 2: immediate (on failure)
+ * - Attempt 3: immediate (on failure)
+ * - If all fail: rejects with MaxRetriesExceeded
+ *
+ * @param operation Function returning AsyncOp<T>
+ * @param max_attempts Max attempts including initial
+ * @return AsyncOp<T> that resolves on first success or rejects after all attempts fail
+ */
+template<typename T, typename F>
+AsyncOp<T> retry(F&& operation, int max_attempts) {
+    return retryWithBackoff(std::forward<F>(operation), max_attempts,
+                           std::chrono::milliseconds(0));
+}
+
+/**
  * @brief Execute async operation for each item SEQUENTIALLY
  * 
  * Processes one item at a time. Fails immediately on first error (remaining items NOT processed).
