@@ -1636,13 +1636,332 @@ void testMapSettledAllSuccess()
     runValueTest("mapSettled() all success - result count", 3, static_cast<int>(results.size()));
     
     if (results.size() == 3) {
-        runTest("All results fulfilled", 
+        runTest("All results fulfilled",
                 results[0].isFulfilled() && results[1].isFulfilled() && results[2].isFulfilled(),
                 true);
         runValueTest("Result[0] value", 2, results[0].value);
         runValueTest("Result[1] value", 4, results[1].value);
         runValueTest("Result[2] value", 6, results[2].value);
     }
+}
+
+// ══════════════════════════════════════════════
+// FILTER AND CANCEL TESTS
+// ══════════════════════════════════════════════
+
+void testFilter()
+{
+    std::cout << "\n=== Testing filter() ===" << std::endl;
+
+    // Test 1: Success filter - pass through
+    bool filter_passed = false;
+    int filter_value = 0;
+
+    ao::AsyncOp<int>::resolved(42)
+        .filter([](int val) -> int {
+            return val;  // Pass through
+        }, nullptr)
+        .then([&](int val) {
+            filter_passed = true;
+            filter_value = val;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() pass through executed", true, filter_passed);
+    runValueTest("filter() pass through value", 42, filter_value);
+
+    // Test 2: Success filter - reject
+    bool filter_rejected = false;
+    ao::ErrorCode reject_error = ao::ErrorCode::None;
+
+    ao::AsyncOp<int>::resolved(42)
+        .filter([](int val) -> int {
+            if (val < 50) throw ao::ErrorCode::InvalidResponse;
+            return val;
+        }, nullptr)
+        .then([&](int) {
+            // Should not execute
+        })
+        .onError([&](ao::ErrorCode err) {
+            filter_rejected = true;
+            reject_error = err;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() rejection executed", true, filter_rejected);
+    runTest("filter() rejection error code", ao::ErrorCode::InvalidResponse == reject_error, true);
+
+    // Test 3: Success filter - custom error code
+    ao::ErrorCode custom_error = ao::ErrorCode::None;
+
+    ao::AsyncOp<int>::resolved(10)
+        .filter([](int val) -> int {
+            if (val < 50) throw ao::ErrorCode::Timeout;
+            return val;
+        }, nullptr)
+        .onError([&](ao::ErrorCode err) {
+            custom_error = err;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() custom error code", ao::ErrorCode::Timeout == custom_error, true);
+
+    // Test 4: Error filter - recover
+    bool error_recovered = false;
+    int recovered_value = 0;
+
+    ao::AsyncOp<int>::rejected(ao::ErrorCode::NetworkError)
+        .filter(nullptr, [](ao::ErrorCode) -> int {
+            return 999;  // Recover with fallback value
+        })
+        .then([&](int val) {
+            error_recovered = true;
+            recovered_value = val;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() error recovery executed", true, error_recovered);
+    runValueTest("filter() error recovery value", 999, recovered_value);
+
+    // Test 5: Error filter - propagate
+    bool error_propagated = false;
+    ao::ErrorCode propagated_error = ao::ErrorCode::None;
+
+    ao::AsyncOp<int>::rejected(ao::ErrorCode::Timeout)
+        .filter(nullptr, [](ao::ErrorCode err) -> int {
+            if (err == ao::ErrorCode::NetworkError) return 999;
+            throw err;  // Propagate
+        })
+        .onError([&](ao::ErrorCode err) {
+            error_propagated = true;
+            propagated_error = err;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() error propagation executed", true, error_propagated);
+    runTest("filter() error propagation code", ao::ErrorCode::Timeout == propagated_error, true);
+
+    // Test 6: Both filters - success path
+    bool both_success = false;
+    int both_value = 0;
+
+    ao::AsyncOp<int>::resolved(100)
+        .filter(
+            [](int val) -> int {
+                return val;
+            },
+            [](ao::ErrorCode) -> int {
+                return 0;  // Should not execute
+            }
+        )
+        .then([&](int val) {
+            both_success = true;
+            both_value = val;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() both - success path", true, both_success);
+    runValueTest("filter() both - success value", 100, both_value);
+
+    // Test 7: Both filters - error path
+    bool both_error_recovered = false;
+
+    ao::AsyncOp<int>::rejected(ao::ErrorCode::NetworkError)
+        .filter(
+            [](int) -> int { return 0; },  // Should not execute
+            [](ao::ErrorCode) -> int { return 777; }  // Recover
+        )
+        .then([&](int val) {
+            both_error_recovered = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() both - error recovery", true, both_error_recovered);
+
+    // Test 8: filter() with async operation in middle
+    bool filter_chain_works = false;
+
+    ao::AsyncOp<int>::resolved(50)
+        .filter([](int val) -> int {
+            if (val <= 0) throw ao::ErrorCode::InvalidResponse;
+            return val;
+        }, nullptr)
+        .then([](int val) {
+            return ao::AsyncOp<int>::resolved(val * 2);
+        })
+        .then([&](int val) {
+            filter_chain_works = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() chain continues", true, filter_chain_works);
+}
+
+void testFilterWithVoid()
+{
+    std::cout << "\n=== Testing filter() with AsyncOp<void> ===" << std::endl;
+
+    // Test 1: Success filter - pass through
+    bool void_filter_passed = false;
+
+    ao::AsyncOp<void>::resolved()
+        .filter([]() {
+            // Pass through
+        }, nullptr)
+        .then([&]() {
+            void_filter_passed = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter<void>() pass through", true, void_filter_passed);
+
+    // Test 2: Success filter - reject
+    bool void_filter_rejected = false;
+
+    ao::AsyncOp<void>::resolved()
+        .filter([]() {
+            throw ao::ErrorCode::InvalidResponse;
+        }, nullptr)
+        .onError([&](ao::ErrorCode) {
+            void_filter_rejected = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter<void>() rejection", true, void_filter_rejected);
+
+    // Test 3: Error filter - recover
+    bool void_error_recovered = false;
+
+    ao::AsyncOp<void>::rejected(ao::ErrorCode::NetworkError)
+        .filter(nullptr, [](ao::ErrorCode) {
+            // Recover
+        })
+        .then([&]() {
+            void_error_recovered = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter<void>() error recovery", true, void_error_recovered);
+}
+
+void testCancel()
+{
+    std::cout << "\n=== Testing cancel() ===" << std::endl;
+
+    // Test 1: Cancel pending operation
+    bool cancel_called = false;
+    ao::ErrorCode cancel_error = ao::ErrorCode::None;
+
+    // Test cancel on a truly pending operation
+    ao::AsyncOp<void> cancel_test_op;
+
+    cancel_test_op
+        .onError([&](ao::ErrorCode err) {
+            cancel_called = true;
+            cancel_error = err;
+        });
+
+    cancel_test_op.cancel();
+
+    runEventLoopFor(50);
+
+    runTest("cancel() executes error handler", true, cancel_called);
+    runTest("cancel() uses default Cancelled error",
+            ao::ErrorCode::Cancelled == cancel_error, true);
+
+    // Test 2: Cancel with custom error code
+    ao::ErrorCode custom_cancel_error = ao::ErrorCode::None;
+
+    ao::AsyncOp<void> custom_cancel_op;
+    custom_cancel_op
+        .onError([&](ao::ErrorCode err) {
+            custom_cancel_error = err;
+        });
+
+    custom_cancel_op.cancel(ao::ErrorCode::NetworkError);
+
+    runEventLoopFor(50);
+
+    runTest("cancel() custom error code",
+            ao::ErrorCode::NetworkError == custom_cancel_error, true);
+
+    // Test 3: Cancel already settled operation (should be no-op)
+    bool settled_cancel_called = false;
+
+    ao::AsyncOp<int> settled_op = ao::AsyncOp<int>::resolved(42);
+
+    runEventLoopFor(10);  // Ensure it's settled
+
+    settled_op
+        .onError([&](ao::ErrorCode) {
+            settled_cancel_called = true;  // Should NOT execute
+        });
+
+    settled_op.cancel();
+
+    runEventLoopFor(50);
+
+    runTest("cancel() on settled op is no-op", false, settled_cancel_called);
+
+    // Test 4: Cancel returns *this for chaining
+    ao::AsyncOp<void> chain_test_op;
+    bool chain_cancel_works = false;
+
+    chain_test_op
+        .cancel()
+        .onError([&](ao::ErrorCode) {
+            chain_cancel_works = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("cancel() chain works", true, chain_cancel_works);
+}
+
+void testCancelWithTimerPattern()
+{
+    std::cout << "\n=== Testing cancel() with Timer Pattern ===" << std::endl;
+
+    // Test cancel with manual timer cleanup (typical usage pattern)
+    bool cancel_handler_called = false;
+    bool timer_fired = false;
+
+    ao::AsyncOp<std::string> timer_op;
+    auto timer_promise = timer_op.promise();
+
+    // Simulate starting a timer
+    auto timer_id = ao::add_timeout(std::chrono::milliseconds(100), [timer_promise, &timer_fired]() {
+        timer_fired = true;
+        timer_promise->resolveWith("completed");
+        return false;
+    });
+
+    // Set up error handler
+    timer_op
+        .onError([&](ao::ErrorCode) {
+            cancel_handler_called = true;
+            // In real code, you would clean up resources here:
+            ao::remove_timeout(timer_id);
+        });
+
+    // Cancel immediately
+    timer_op.cancel();
+
+    runEventLoopFor(150);
+
+    runTest("cancel() error handler called", true, cancel_handler_called);
+    runTest("timer cancelled (did not fire)", false, timer_fired);
 }
 
 // ══════════════════════════════════════════════
@@ -1777,7 +2096,13 @@ int test_main_asyncop()
         testMapParallel();
         testMapSettled();
         testMapSettledAllSuccess();
-        
+
+        // Filter and Cancel (NEW)
+        testFilter();
+        testFilterWithVoid();
+        testCancel();
+        testCancelWithTimerPattern();
+
         // Integration
         testComplexScenario();
         

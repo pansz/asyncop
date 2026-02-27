@@ -834,7 +834,16 @@ public:
      * @brief Provide fallback value on any error
      * @param fallback_value Value to use if operation fails
      * @param log_message Optional warning message to log on error
+     *
+     * @deprecated Use `otherwise()` with explicit fallback logic instead:
+     * @code
+     * op.otherwise([](ErrorCode err) {
+     *     spdlog::warn("Error: {}", err);
+     *     return fallback_value;
+     * });
+     * @endcode
      */
+    [[deprecated("Use otherwise() with explicit fallback logic instead")]]
     AsyncOp<T> orElse(T fallback_value, const std::string& log_message = "") {
         return this->otherwise([fallback_value = std::move(fallback_value), 
                             log_message, 
@@ -851,10 +860,25 @@ public:
      * @param error_to_handle Specific ErrorCode to handle
      * @param handler Recovery function for this error type
      * @note Re-throws other error types
+     *
+     * @deprecated Use `filter()` with error filter only for more flexible error handling:
+     * @code
+     * // Old: recoverFrom
+     * op.recoverFrom(ErrorCode::Timeout, [](ErrorCode err) {
+     *     return defaultValue;
+     * });
+     *
+     * // New: filter with error handler only
+     * op.filter(nullptr, [](ErrorCode err) -> T {
+     *     if (err == ErrorCode::Timeout) return defaultValue;
+     *     throw err;  // propagate other errors
+     * });
+     * @endcode
      */
     template<typename F>
+    [[deprecated("Use filter() with error filter for more flexible handling")]]
     AsyncOp<T> recoverFrom(ErrorCode error_to_handle, F&& handler) {
-        return this->recover([error_to_handle, 
+        return this->recover([error_to_handle,
                             handler = std::forward<F>(handler)](ErrorCode err) mutable -> T {
             if (err == error_to_handle) {
                 return handler(err);
@@ -862,7 +886,193 @@ public:
             throw err;  // Re-throw non-matching errors
         });
     }
-    
+
+    /**
+     * @brief Cancel the operation with specified error code
+     *
+     * Rejects the operation with ErrorCode::Cancelled (or custom code) if pending.
+     * Does nothing if already settled.
+     *
+     * @param code Error code to use (default: ErrorCode::Cancelled)
+     * @return *this for chaining
+     *
+     * @note This only cancels the AsyncOp state, not any underlying operation.
+     * Similar to timeout(), the caller is responsible for cleaning up any
+     * underlying resources (timers, network requests, etc.).
+     *
+     * @code
+     * // Cancel with default error code
+     * asyncOp.cancel();
+     *
+     * // Cancel with custom error code
+     * asyncOp.cancel(ErrorCode::NetworkError);
+     *
+     * // Typical usage: cancel on external event
+     * auto op = fetchData();
+     * onCancelButtonClicked.connect([op]() { op.cancel(); });
+     * @endcode
+     */
+    AsyncOp<T>& cancel(ErrorCode code = ErrorCode::Cancelled) {
+        if (m_promise->isPending()) {
+            m_promise->rejectWith(code);
+            spdlog::debug("AsyncOp[{}] cancelled with error {}", id(), code);
+        } else {
+            spdlog::trace("AsyncOp[{}] already settled, ignoring cancel()", id());
+        }
+        return *this;
+    }
+
+    /**
+     * @brief Filter with dual-path handling for success and error
+     *
+     * Provides unified filtering for both success and error paths:
+     * - Success filter: Return T to pass through, throw ErrorCode to reject
+     * - Error filter: Return T to recover, throw ErrorCode to propagate
+     *
+     * @tparam SuccessF Success filter function type (T -> T)
+     * @tparam ErrorF Error filter function type (ErrorCode -> T)
+     * @param successFilter Filter for success path. Return value to pass, throw ErrorCode to reject.
+     * @param errorFilter Filter for error path. Return value to recover, throw to propagate.
+     * @return New AsyncOp<T> with filtering applied
+     *
+     * Move semantics: Value is moved into callback. User controls return copy/move:
+     * @code
+     * // Move on return (avoid copy)
+     * op.filter([](User& u) -> User {
+     *     if (!u.isValid()) throw ErrorCode::InvalidResponse;
+     *     return std::move(u);
+     * });
+     *
+     * // Copy on return (input was const ref)
+     * op.filter([](const User& u) -> User {
+     *     if (!u.isValid()) throw ErrorCode::InvalidResponse;
+     *     return u;
+     * });
+     * @endcode
+     *
+     * @note Pass nullptr for either filter to propagate that path unchanged.
+     *
+     * @code
+     * // Both filters
+     * op.filter(
+     *     [](User& u) -> User {
+     *         if (!u.isValid()) throw ErrorCode::InvalidResponse;
+     *         return std::move(u);
+     *     },
+     *     [](ErrorCode err) -> User {
+     *         if (err == ErrorCode::Timeout) return defaultUser;
+     *         throw err;  // propagate other errors
+     *     }
+     * );
+     *
+     * // Success filter only (errors propagate unchanged)
+     * op.filter([](User& u) -> User {
+     *     if (!u.isValid()) throw ErrorCode::InvalidResponse;
+     *     return std::move(u);
+     * });
+     *
+     * // Error filter only (success propagates unchanged)
+     * op.filter(nullptr, [](ErrorCode err) -> User {
+     *     return defaultUser;
+     * });
+     *
+     * // No filters (just propagates both paths)
+     * op.filter(nullptr, nullptr);
+     * @endcode
+     */
+    template<typename SuccessF, typename ErrorF>
+    auto filter(SuccessF&& successFilter, ErrorF&& errorFilter) -> AsyncOp<T> {
+        spdlog::trace("AsyncOp[{}] adding filter with dual handlers", id());
+
+        AsyncOp<T> result;
+        auto result_state = result.m_promise;
+        auto op_id = m_promise->op_id;
+
+        // Set up success filter
+        if constexpr (!std::is_null_pointer_v<SuccessF>) {
+            if (!m_promise->canOverwriteSuccessCallback()) {
+                spdlog::error("AsyncOp[{}] filter() called after terminal success handler", id());
+                assert(false && "filter() cannot overwrite existing non-propagating success callback");
+            } else {
+                m_promise->status_flags.success_cb_is_propagating = 0;
+                m_promise->success_cb = [f = std::decay_t<SuccessF>(successFilter), result_state, op_id](T val) mutable {
+                    spdlog::debug("AsyncOp[{}] executing filter success handler", op_id);
+                    try {
+                        T filtered = f(std::move(val));
+                        result_state->resolveWith(std::move(filtered));
+                    } catch (ErrorCode err) {
+                        spdlog::debug("AsyncOp[{}] filter success handler rejected with {}", op_id, err);
+                        result_state->rejectWith(err);
+                    } catch (const std::exception& e) {
+                        spdlog::error("AsyncOp[{}] exception in filter success handler: {}", op_id, e.what());
+                        result_state->rejectWith(ErrorCode::Exception);
+                    } catch (...) {
+                        spdlog::error("AsyncOp[{}] unknown exception in filter success handler", op_id);
+                        result_state->rejectWith(ErrorCode::Exception);
+                    }
+                };
+            }
+        } else {
+            // Success propagates unchanged
+            if (m_promise->canOverwriteSuccessCallback()) {
+                m_promise->status_flags.success_cb_is_propagating = 1;
+                m_promise->success_cb = [result_state, op_id](T val) mutable {
+                    spdlog::debug("AsyncOp[{}] filter propagating success", op_id);
+                    result_state->resolveWith(std::move(val));
+                };
+            }
+        }
+
+        // Set up error filter
+        if constexpr (!std::is_null_pointer_v<ErrorF>) {
+            if (!m_promise->canOverwriteErrorCallback()) {
+                spdlog::error("AsyncOp[{}] filter() called after terminal error handler", id());
+                assert(false && "filter() cannot overwrite existing non-propagating error callback");
+            } else {
+                m_promise->status_flags.error_cb_is_propagating = 0;
+                m_promise->error_cb = [f = std::decay_t<ErrorF>(errorFilter), result_state, op_id](ErrorCode err) mutable {
+                    spdlog::debug("AsyncOp[{}] executing filter error handler", op_id);
+                    try {
+                        T recovered = f(err);
+                        result_state->resolveWith(std::move(recovered));
+                    } catch (ErrorCode thrown) {
+                        spdlog::debug("AsyncOp[{}] filter error handler propagating {}", op_id, thrown);
+                        result_state->rejectWith(thrown);
+                    } catch (const std::exception& e) {
+                        spdlog::error("AsyncOp[{}] exception in filter error handler: {}", op_id, e.what());
+                        result_state->rejectWith(ErrorCode::Exception);
+                    } catch (...) {
+                        spdlog::error("AsyncOp[{}] unknown exception in filter error handler", op_id);
+                        result_state->rejectWith(ErrorCode::Exception);
+                    }
+                };
+            }
+        } else {
+            // Error propagates unchanged
+            if (m_promise->canOverwriteErrorCallback()) {
+                m_promise->status_flags.error_cb_is_propagating = 1;
+                m_promise->error_cb = [result_state, op_id](ErrorCode err) mutable {
+                    spdlog::debug("AsyncOp[{}] filter propagating error {}", op_id, err);
+                    result_state->rejectWith(err);
+                };
+            }
+        }
+
+        // If already settled, execute immediately
+        if (!isPending()) {
+            add_idle([state = m_promise]() {
+                if (state->isResolved() && state->success_cb) {
+                    state->success_cb(std::move(state->result_value));
+                } else if (state->isRejected() && state->error_cb) {
+                    state->error_cb(state->getErrorCode());
+                }
+                return false;
+            });
+        }
+
+        return result;
+    }
+
     // Idempotent resolve/reject - these check isPending() internally
     void resolve(T value) {
         if (!isPending()) {
