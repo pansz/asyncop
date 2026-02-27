@@ -3,20 +3,26 @@
  * @brief Lightweight asynchronous operation chaining for embedded Linux
  * @author pansz
  * @date 2026.2.8
- * 
- * AsyncOp 2.3
- * 
+ *
+ * AsyncOp 2.4
+ *
  * Promise/Future-like pattern for chaining async I/O operations. Eliminates callback hell
  * and improves code readability. Designed for embedded systems with moderate memory constraints.
- * 
+ *
  * Backend Support:
  * - GLib 2.0+ (default)
  * - Qt 5.12+ (define ASYNC_USE_QT)
  * - Extensible to other event loops via ao_event_loop.hpp
- * 
+ *
  * @note See async_op_doc.md for comprehensive usage guide
  * @note Requires ao_event_loop.hpp, spdlog
  * @note C++17 or later
+ *
+ * v2.4 Changes:
+ * - Added: cancel() - Reject pending operations with configurable error code
+ * - Added: filter() - Dual-path success/error filtering with throw/return semantics
+ * - Deprecated: orElse() - Use otherwise() with explicit logic instead
+ * - Deprecated: recoverFrom() - Use filter() with error filter instead
  */
 
 #ifndef ASYNC_OP_HPP

@@ -22,10 +22,12 @@ namespace ao {
 
 /**
  * @brief AsyncOp<void> specialization for operations without return values
- * 
+ *
  * Identical API to AsyncOp<T> but for void operations (signals, notifications, etc).
- * 
+ *
  * @note CRITICAL: Always capture asyncOp.promise() (not AsyncOp itself) in callbacks
+ *
+ * @since AsyncOp 2.4
  */
 template<>
 class AsyncOp<void> {
