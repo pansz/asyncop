@@ -655,7 +655,7 @@ fetchData()
 
 ### Migration from recoverFrom()
 
-`filter()` replaces `recoverFrom()` with more flexible error handling:
+`filterError()` provides a cleaner API for error-only handling:
 
 ```cpp
 // Old: recoverFrom (deprecated)
@@ -663,9 +663,27 @@ op.recoverFrom(ao::ErrorCode::Timeout, [](ErrorCode err) {
     return defaultValue;
 });
 
-// New: filter with error filter only
-op.filter(nullptr, [](ao::ErrorCode err) -> T {
+// New: filterError (recommended)
+op.filterError([](ao::ErrorCode err) -> T {
     if (err == ao::ErrorCode::Timeout) return defaultValue;
+    throw err;  // propagate other errors
+});
+```
+
+### filterSuccess() and filterError()
+
+Convenience wrappers for single-path filtering:
+
+```cpp
+// Validate success result, errors propagate unchanged
+op.filterSuccess([](Data& d) -> Data {
+    if (!isValid(d)) throw ao::ErrorCode::InvalidResponse;
+    return std::move(d);
+});
+
+// Handle specific errors, success propagates unchanged
+op.filterError([](ao::ErrorCode err) -> Data {
+    if (err == ao::ErrorCode::Timeout) return getCachedData();
     throw err;  // propagate other errors
 });
 ```
@@ -680,10 +698,10 @@ op.filter(nullptr, [](ao::ErrorCode err) -> T {
 **Move semantics:** For expensive-to-copy types, use `std::move()` on return:
 
 ```cpp
-.filter([](LargeObject& obj) -> LargeObject {
+.filterSuccess([](LargeObject& obj) -> LargeObject {
     if (!isValid(obj)) throw ao::ErrorCode::InvalidResponse;
     return std::move(obj);  // Avoid copy
-}, nullptr)
+})
 ```
 
 ---

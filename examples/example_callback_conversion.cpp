@@ -140,11 +140,15 @@ void demonstrateErrorHandling() {
             spdlog::info("Got user (recovered): {}", user);
         });
     
-    // Example of conditional error recovery
+    // Example of conditional error recovery using filterError()
+    // filterError() handles only errors, success propagates unchanged
     sendHttpRequest("https://api.example.com/data", "sample data")
-        .recoverFrom(ao::ErrorCode::NetworkError, [](ao::ErrorCode err) -> std::string {
-            spdlog::warn("Network error occurred, returning mock response");
-            return "Mock response data";
+        .filterError([](ao::ErrorCode err) -> std::string {
+            if (err == ao::ErrorCode::NetworkError) {
+                spdlog::warn("Network error occurred, returning mock response");
+                return "Mock response data";  // Recover from NetworkError
+            }
+            throw err;  // Propagate other errors
         })
         .then([](const std::string& response) {
             spdlog::info("Received response: {}", response);

@@ -448,17 +448,30 @@ public:
     auto next(SuccessF&& success_handler, ErrorF&& error_handler) -> AsyncOp<void> {
         using SuccessInvokeResult = typename std::invoke_result<SuccessF>::type;
         using ErrorInvokeResult = typename std::invoke_result<ErrorF, ErrorCode>::type;
-        
-        // For void specialization, we need to check if handlers return void or AsyncOp<void>
-        static_assert(
-            std::is_void_v<SuccessInvokeResult> || is_async_op_v<SuccessInvokeResult>,
-            "next() success handler must return void or AsyncOp<void>"
-        );
-        static_assert(
-            std::is_void_v<ErrorInvokeResult> || is_async_op_v<ErrorInvokeResult>,
-            "next() error handler must return void or AsyncOp<void>"
-        );
-        
+
+        if constexpr (std::is_null_pointer_v<ErrorF>) {
+            if constexpr (std::is_null_pointer_v<SuccessF>) {
+                static_assert(dependent_false_v<SuccessF>, "next() does not accept nullptr, use filter() instead.");
+            } else {
+                AsyncOp<void> next_op;
+                static_assert(dependent_false_v<SuccessF>, "next() does not accept nullptr, use then() instead.");
+                return next_op;
+            }
+        } else if constexpr (std::is_null_pointer_v<SuccessF>) {
+            static_assert(dependent_false_v<ErrorF>, "next() does not accept nullptr, use recover() instead.");
+        } else {
+            // For void specialization, we need to check if handlers return void or AsyncOp<void>
+            static_assert(
+                std::is_void_v<SuccessInvokeResult> || is_async_op_v<SuccessInvokeResult>,
+                "next() success handler must return void or AsyncOp<void>"
+            );
+            static_assert(
+                std::is_void_v<ErrorInvokeResult> || is_async_op_v<ErrorInvokeResult>,
+                "next() error handler must return void or AsyncOp<void>"
+            );
+
+        }
+
         spdlog::trace("AsyncOp<void>[{}] adding next() with dual handlers", id());
         
         AsyncOp<void> next_op;
@@ -799,34 +812,19 @@ public:
      * @param errorFilter Filter for error path. Return to recover, throw to propagate.
      * @return New AsyncOp<void> with filtering applied
      *
-     * @note Pass nullptr for either filter to propagate that path unchanged.
+     * @note For single-path filtering, use filterSuccess() or filterError() for clearer intent.
      *
      * @code
-     * // Both filters
-     * op.filter(
-     *     []() {
-     *         if (!conditionMet()) throw ErrorCode::InvalidResponse;
-     *         // pass through
-     *     },
-     *     [](ErrorCode err) {
-     *         if (err == ErrorCode::Timeout) return;  // recover
-     *         throw err;  // propagate other errors
-     *     }
-     * );
-     *
      * // Success filter only (errors propagate unchanged)
-     * op.filter([]() {
+     * op.filterSuccess([]() {
      *     if (!conditionMet()) throw ErrorCode::InvalidResponse;
      * });
      *
      * // Error filter only (success propagates unchanged)
-     * op.filter(nullptr, [](ErrorCode err) {
-     *     logError(err);
-     *     return;  // recover
+     * op.filterError([](ErrorCode err) {
+     *     if (err == ErrorCode::Timeout) return;  // recover
+     *     throw err;  // propagate other errors
      * });
-     *
-     * // No filters (just propagates both paths)
-     * op.filter(nullptr, nullptr);
      * @endcode
      */
     template<typename SuccessF, typename ErrorF>
@@ -920,6 +918,56 @@ public:
         }
 
         return result;
+    }
+
+    /**
+     * @brief Filter success path only, errors propagate unchanged
+     *
+     * Convenience wrapper for filter() when you only need to validate
+     * the success result. Errors pass through without modification.
+     *
+     * @tparam SuccessF Filter function type (() -> void)
+     * @param successFilter Filter for success path. Return to pass, throw ErrorCode to reject.
+     * @return New AsyncOp<void> with success filtering applied
+     *
+     * @code
+     * // Validate before passing through
+     * op.filterSuccess([]() {
+     *     if (!conditionMet()) throw ErrorCode::InvalidResponse;
+     * });
+     * @endcode
+     */
+    template<typename SuccessF>
+    auto filterSuccess(SuccessF&& successFilter) -> AsyncOp<void> {
+        return filter(std::forward<SuccessF>(successFilter), nullptr);
+    }
+
+    /**
+     * @brief Filter error path only, success propagates unchanged
+     *
+     * Convenience wrapper for filter() when you only need to handle errors.
+     * Success values pass through without modification.
+     *
+     * @tparam ErrorF Filter function type (ErrorCode -> void)
+     * @param errorFilter Filter for error path. Return to recover, throw ErrorCode to propagate.
+     * @return New AsyncOp<void> with error filtering applied
+     *
+     * @code
+     * // Recover from specific error
+     * op.filterError([](ErrorCode err) {
+     *     if (err == ErrorCode::Timeout) return;  // recover
+     *     throw err;  // propagate other errors
+     * });
+     *
+     * // Log all errors but propagate
+     * op.filterError([](ErrorCode err) {
+     *     spdlog::warn("Operation failed: {}", err);
+     * });
+     * @endcode
+     */
+    template<typename ErrorF>
+    auto filterError(ErrorF&& errorFilter) -> AsyncOp<void> {
+        return filter(nullptr, std::forward<ErrorF>(errorFilter));
     }
 
     // Idempotent resolve/reject

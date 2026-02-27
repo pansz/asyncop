@@ -360,8 +360,12 @@ void testOtherwiseSuccessPropagation()
 
 void testOrElse()
 {
+    // Intentional usage of deprecated API - testing during deprecation period
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
     std::cout << "\n=== Testing orElse() Convenience ===" << std::endl;
-    
+
     bool recovered = false;
     int final_value = 0;
 
@@ -371,17 +375,23 @@ void testOrElse()
             recovered = true;
             final_value = value;
         });
-    
+
     runEventLoopFor(150);
-    
+
     runTest("orElse() recovered", true, recovered);
     runValueTest("orElse() fallback value", 777, final_value);
+
+    #pragma GCC diagnostic pop
 }
 
 void testRecoverFrom()
 {
+    // Intentional usage of deprecated API - testing during deprecation period
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
     std::cout << "\n=== Testing recoverFrom() Selective Recovery ===" << std::endl;
-    
+
     // Test 1: Recover from matching error
     bool recovered = false;
     int final_value = 0;
@@ -394,12 +404,12 @@ void testRecoverFrom()
             recovered = true;
             final_value = value;
         });
-    
+
     runEventLoopFor(150);
-    
+
     runTest("recoverFrom() matched error", true, recovered);
     runValueTest("recoverFrom() recovery value", 555, final_value);
-    
+
     // Test 2: Don't recover from non-matching error
     bool error_rethrown = false;
     ao::ErrorCode caught_error = ao::ErrorCode::None;
@@ -415,13 +425,15 @@ void testRecoverFrom()
             error_rethrown = true;
             caught_error = err;
         });
-    
+
     runEventLoopFor(150);
-    
+
     runTest("recoverFrom() re-threw non-matching error", true, error_rethrown);
     runTest("Original error preserved",
             ao::ErrorCode::NetworkError == caught_error,
             true);
+
+    #pragma GCC diagnostic pop
 }
 
 void testRecoverBranching()
