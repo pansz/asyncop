@@ -21,6 +21,7 @@ Thumbs.db
 
 # Package manager
 node_modules/
+package-lock.json
 
 # Claude Code
 CLAUDE.md
