@@ -1,4 +1,4 @@
-# AsyncOp Library v2.3 - Documentation
+# AsyncOp Library v2.4 - Documentation
 
 > **Lightweight Promise/Future pattern for embedded Linux with GLib or Qt**
 > 
@@ -541,6 +541,151 @@ operation()
     });
 ```
 
+#### cancel()
+
+Cancel a pending operation with a configurable error code:
+
+```cpp
+// Cancel with default error (ErrorCode::Cancelled)
+auto op = fetchData();
+cancelButton.clicked.connect([&op]() {
+    op.cancel();  // Rejects with ErrorCode::Cancelled
+});
+
+// Cancel with custom error code
+op.cancel(ao::ErrorCode::NetworkError);
+
+// Chain after cancel
+op.cancel()
+    .onError([](ao::ErrorCode err) {
+        spdlog::warn("Operation cancelled: {}", err);
+    });
+```
+
+**Important notes:**
+- `cancel()` only rejects the AsyncOp state, not underlying operations
+- For timer-based operations, you must clean up resources manually:
+
+```cpp
+// Typical timer pattern with cleanup
+auto timer_op = ao::AsyncOp<Data>();
+auto timer_id = add_timeout(5000ms, [timer_op]() {
+    timer_op.m_promise->resolveWith(data);
+    return false;
+});
+
+// Cancel button handler
+cancelButton.clicked.connect([&timer_op, timer_id]() {
+    ao::remove_timeout(timer_id);  // Manual cleanup
+    timer_op.cancel();             // Reject the AsyncOp
+});
+```
+
+---
+
+## Advanced Filtering with filter()
+
+The `filter()` method provides unified handling for both success and error paths with a single call.
+
+### Dual-Path Filtering
+
+```cpp
+operation()
+    .filter(
+        [](Result& r) -> Result {
+            // Success filter: validate and pass through
+            if (!r.isValid()) {
+                throw ao::ErrorCode::InvalidResponse;  // Reject
+            }
+            return std::move(r);  // Pass through (use std::move to avoid copy)
+        },
+        [](ao::ErrorCode err) -> Result {
+            // Error filter: recover from specific errors
+            if (err == ao::ErrorCode::Timeout) {
+                return getCachedResult();  // Recover with cached data
+            }
+            throw err;  // Propagate other errors
+        }
+    )
+    .then([](Result r) {
+        // Receives result from either success path or error recovery
+        processResult(r);
+    });
+```
+
+### Success Filter Only
+
+Pass `nullptr` for error filter to propagate errors unchanged:
+
+```cpp
+fetchData()
+    .filter(
+        [](Data& d) -> Data {
+            if (d.empty()) throw ao::ErrorCode::InvalidResponse;
+            return std::move(d);
+        },
+        nullptr  // Errors propagate unchanged
+    )
+    .onError([](ao::ErrorCode err) {
+        // Catches both fetch errors and validation errors
+        handleAllErrors(err);
+    });
+```
+
+### Error Filter Only
+
+Pass `nullptr` for success filter to pass values unchanged:
+
+```cpp
+fetchData()
+    .filter(
+        nullptr,  // Success propagates unchanged
+        [](ao::ErrorCode err) -> Data {
+            // Recovery logic - equivalent to recoverFrom() but more flexible
+            if (err == ao::ErrorCode::NetworkError) {
+                return getFallbackData();
+            }
+            throw err;  // Propagate other errors
+        }
+    )
+    .then([](Data d) {
+        processData(d);
+    });
+```
+
+### Migration from recoverFrom()
+
+`filter()` replaces `recoverFrom()` with more flexible error handling:
+
+```cpp
+// Old: recoverFrom (deprecated)
+op.recoverFrom(ao::ErrorCode::Timeout, [](ErrorCode err) {
+    return defaultValue;
+});
+
+// New: filter with error filter only
+op.filter(nullptr, [](ao::ErrorCode err) -> T {
+    if (err == ao::ErrorCode::Timeout) return defaultValue;
+    throw err;  // propagate other errors
+});
+```
+
+### filter() Callback Semantics
+
+| Filter Path | Return Value | Throw ErrorCode |
+|-------------|--------------|-----------------|
+| Success     | Pass value through | Reject with error |
+| Error       | Recover with value | Propagate error |
+
+**Move semantics:** For expensive-to-copy types, use `std::move()` on return:
+
+```cpp
+.filter([](LargeObject& obj) -> LargeObject {
+    if (!isValid(obj)) throw ao::ErrorCode::InvalidResponse;
+    return std::move(obj);  // Avoid copy
+}, nullptr)
+```
+
 ---
 
 ## Error Handling & Recovery
@@ -1013,10 +1158,16 @@ public:
     // NOTE: Callback overwrite protection prevents overwriting existing error callbacks
     // unless the previous callback was a propagation callback.
     // WARNING: If not the last handler in chain, the next handler must be then().
-    
+
+    // Cancellation
+    AsyncOp<T>& cancel(ErrorCode code = ErrorCode::Cancelled);
+    // Rejects pending operation with specified error code
+    // Returns *this for chaining; no-op if already settled
+    // Note: Only cancels AsyncOp state, not underlying operations (timers, etc.)
+
     // Utilities
     AsyncOp<T> timeout(std::chrono::milliseconds duration);
-    
+
     template<typename F>
     AsyncOp<T> tap(F&& side_effect_fn);           // Side effects
     // NOTE: Does not prevent subsequent callback overwrites.
@@ -1026,10 +1177,20 @@ public:
     // NOTE: Callback overwrite protection allows overwriting propagation callbacks
     // set by methods like recover() and finally().
 
-    AsyncOp<T> orElse(T fallback_value, const std::string& log_msg = "");
+    template<typename SuccessF, typename ErrorF>
+    AsyncOp<T> filter(SuccessF&& successFilter, ErrorF&& errorFilter);
+    // Dual-path filtering for success and error handling
+    // Success filter: return T to pass, throw ErrorCode to reject
+    // Error filter: return T to recover, throw ErrorCode to propagate
+    // Pass nullptr for unused filter path (propagates unchanged)
+
+    // Deprecated methods
+    [[deprecated]] AsyncOp<T> orElse(T fallback_value, const std::string& log_msg = "");
+    // Use otherwise() with explicit fallback logic instead
 
     template<typename F>
-    AsyncOp<T> recoverFrom(ErrorCode err, F&& handler);  // Specific error
+    [[deprecated]] AsyncOp<T> recoverFrom(ErrorCode err, F&& handler);
+    // Use filter() with error filter only instead
 };
 
 ### Chaining Rules and Constraints

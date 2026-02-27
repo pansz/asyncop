@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.4.0] - 2026-02-27
+
+### Added
+- `cancel()` function to reject pending operations with configurable error code
+  - Returns `*this` for chaining
+  - No-op if operation already settled
+  - Similar semantics to `timeout()` - caller manages underlying resources
+
+- `filter()` function for dual-path success/error filtering
+  - Success filter: return value to pass through, throw `ErrorCode` to reject
+  - Error filter: return value to recover, throw `ErrorCode` to propagate
+  - Pass `nullptr` for unused filter path
+  - Replaces need for separate `recoverFrom()` with more flexible API
+
+### Deprecated
+- `orElse()` - Use `otherwise()` with explicit fallback logic instead
+- `recoverFrom()` - Use `filter()` with error filter only instead
+
+### Changed
+- Updated documentation with new API methods and examples
+
 ## [2.3.2] - 2026-02-25
 
 ### Changed
