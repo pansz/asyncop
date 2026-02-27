@@ -966,16 +966,16 @@ public:
      * Move semantics: Value is moved into callback. User controls return copy/move:
      * @code
      * // Move on return (avoid copy)
-     * op.filter([](User& u) -> User {
+     * op.filterSuccess([](User& u) -> User {
      *     if (!u.isValid()) throw ErrorCode::InvalidResponse;
      *     return std::move(u);
-     * }, nullptr);
+     * });
      *
      * // Copy on return (input was const ref)
-     * op.filter([](const User& u) -> User {
+     * op.filterSuccess([](const User& u) -> User {
      *     if (!u.isValid()) throw ErrorCode::InvalidResponse;
      *     return u;
-     * }, nullptr);
+     * });
      * @endcode
      *
      * @note For single-path filtering, use filterSuccess() or filterError() for clearer intent.

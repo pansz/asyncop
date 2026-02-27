@@ -738,22 +738,22 @@ public:
      * @param handler Recovery function for this error type
      * @note Re-throws other error types
      *
-     * @deprecated Use `filter()` with error filter only for more flexible error handling:
+     * @deprecated Use `filterError()` for more flexible error handling:
      * @code
      * // Old: recoverFrom
      * op.recoverFrom(ErrorCode::Timeout, [](ErrorCode err) {
      *     logError(err);
      * });
      *
-     * // New: filter with error handler only
-     * op.filter(nullptr, [](ErrorCode err) {
+     * // New: filterError
+     * op.filterError([](ErrorCode err) {
      *     if (err == ErrorCode::Timeout) { logError(err); return; }
      *     throw err;  // propagate other errors
      * });
      * @endcode
      */
     template<typename F>
-    [[deprecated("Use filter() with error filter for more flexible handling")]]
+    [[deprecated("Use filterError() for more flexible handling")]]
     AsyncOp<void> recoverFrom(ErrorCode error_to_handle, F&& handler) {
         return this->recover([error_to_handle,
                             handler = std::forward<F>(handler)](ErrorCode err) mutable -> void {
