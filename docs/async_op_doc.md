@@ -1,8 +1,8 @@
-# AsyncOp Library v2.4.1 - Documentation
+# AsyncOp Library v2.4.1 - Complete Documentation
 
-> **Lightweight Promise/Future pattern for embedded Linux with GLib or Qt**
+> **Modern Promise/Future pattern for embedded Linux**
 > 
-> Modern async programming with chainable operations, powerful error recovery, and comprehensive collection utilities. Designed for embedded systems with moderate memory constraints (64MB+ RAM).
+> Chainable asynchronous operations with comprehensive error handling, designed for embedded systems with GLib or Qt event loops.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
@@ -14,16 +14,16 @@
 
 1. [Quick Start](#quick-start)
 2. [Core Concepts](#core-concepts)
-3. [Promise/Future Semantics](#promisefuture-semantics)
-4. [Basic Usage](#basic-usage)
-5. [Error Handling & Recovery](#error-handling--recovery)
-6. [Collection Operations](#collection-operations)
-7. [Core API Reference](#core-api-reference)
-8. [Utility Functions](#utility-functions)
+3. [Promise/Future Pattern](#promisefuture-pattern)
+4. [API Reference](#api-reference)
+5. [Chaining Operations](#chaining-operations)
+6. [Error Handling](#error-handling)
+7. [Collection Operations](#collection-operations)
+8. [Advanced Patterns](#advanced-patterns)
 9. [Thread Safety](#thread-safety)
 10. [Best Practices](#best-practices)
-11. [Troubleshooting](#troubleshooting)
-12. [Performance Tips](#performance-tips)
+11. [Performance Considerations](#performance-considerations)
+12. [Integration Guide](#integration-guide)
 
 ---
 
@@ -34,51 +34,49 @@
 ```cpp
 #include "async_op.hpp"
 
-// For Qt backend: please define ASYNC_USE_QT in CMakeLists.txt or compiler option.
+// For Qt backend, define ASYNC_USE_QT in compiler options
+// Default is GLib backend
 ```
 
-### Your First Async Operation
+**Requirements:**
+- C++17 or later
+- GLib 2.0+ (default) or Qt 5.12+ (with ASYNC_USE_QT defined)
+- spdlog (includes fmt for formatting)
+
+### Hello AsyncOp
 
 ```cpp
 // Simple delay
-ao::delay(std::chrono::seconds(1))
+ao::delay(1000ms)
     .then([]() {
         spdlog::info("1 second has passed!");
     });
 
-// Chaining operations
+// Fetch user and posts
 fetchUserAsync(userId)
     .then([](User user) {
-        return fetchUserPostsAsync(user.id);
+        return fetchPostsAsync(user.id);
     })
     .then([](std::vector<Post> posts) {
         displayPosts(posts);
     })
     .onError([](ao::ErrorCode err) {
-        spdlog::error("Failed: {}", err);  // Uses fmt formatter
+        spdlog::error("Failed: {}", err);
     });
 ```
 
-### With Error Recovery
+### Error Recovery
 
 ```cpp
-fetchFromPrimaryServer()
+fetchFromCache()
     .recover([](ao::ErrorCode err) {
-        spdlog::warn("Primary failed ({}), using cache", err);
-        return getCachedData();  // Recover to success!
+        spdlog::warn("Cache miss, fetching from DB");
+        return fetchFromDatabase();
     })
     .then([](Data data) {
-        // data from either primary or cache
         processData(data);
     });
 ```
-
-### Requirements
-
-- **C++17 or later**
-- **GLib 2.0+** or **Qt 5.12+** (event loop backend)
-- **spdlog** (for logging, includes fmt)
-- **Modern compiler** (GCC 7+, Clang 5+)
 
 ---
 
@@ -87,1444 +85,1121 @@ fetchFromPrimaryServer()
 ### What is AsyncOp?
 
 `AsyncOp<T>` represents an asynchronous operation that will eventually:
-- **Resolve** with a value of type `T` (success), or
+- **Resolve** with a value of type `T` (success)
 - **Reject** with an `ErrorCode` (failure)
 
-Think of it as a "container for a future value" that you can chain operations on.
+It's a "container for a future value" that you can chain operations on.
 
-### Promise/Future Model
+### The Promise/Future Model
 
-AsyncOp uses the **Promise/Future pattern**:
-
-- **`AsyncOp<T>`** = **Future** (consumer side)
-  - Provides methods to react to results: `.then()`, `.onError()`, `.recover()`
-  - Returned from async functions
-  - Can be copied and shared safely
-
-- **`Promise<T>`** = **Promise** (producer side)  
-  - Type alias for `std::shared_ptr<AsyncOp<T>::State>`
-  - Provides methods to produce results: `.resolveWith()`, `.rejectWith()`
-  - Captured in async callbacks to settle the operation
-  - Obtained via `.promise()` method on AsyncOp
-
-### The Eight Core Methods
-
-| Method | Purpose | When Used | Continues Chain? | Overwrite Protection |
-|--------|---------|-----------|------------------|----------------------|
-| **`.then()`** | Transform success values | Success path | ✅ Yes (value to value, error unchanged) | Prevents overwriting success, allow error callback to be overwrite |
-| **`.next()`** | Handle both paths | Dual processing | ✅ Yes (error/value to value) | Prevents overwriting existing callbacks |
-| **`.recover()`** | Convert errors to success | Error recovery | ✅ Yes (error to value, value unchanged) | Prevents overwriting error, allow success callback to be overwrite |
-| **`.filter()`** | Dual-path filtering | Success/error filtering | ✅ Yes (converges types) | depends on canOverwriteCallback() |
-| **`.onSuccess()`** | Final success handling | Success path (terminal) | ❌ No | overwriting next success callback |
-| **`.onError()`** | Final error handling | Error path (terminal) | ❌ No | overwriting next error callback |
-| **`.tap()`** | Side effects on success | Debugging/logging | ✅ Yes (all unchanged) | Inserts a node in chain and will not overwrite |
-| **`ao::delay()`** | Delayed execution | Timing/scheduling | ✅ Yes (returns AsyncOp<void>) | N/A (static factory) |
-
-**Note:** `.otherwise()` is a semantic alias for `.recover()` (identical functionality, clearer intent for branching).
-`tapError()` is a convenience wrapper around `filterError()` for error-side side effects.
-
-### Flow Visualization
+AsyncOp uses the classic Promise/Future separation:
 
 ```
-Linear Success Chain:
-    operation → .then() → .then() → .then() → success! (chain can continue)
-                   ↓         ↓         ↓
-                   └─────────┴─────────→ .onError() (if any fails)
-
-Terminal Success Chain:
-    operation → .then() → .then() → .onSuccess() (terminates chain)
-                   ↓         ↓
-                   └─────────┴─────→ .onError() (if any fails)
-
-Error Recovery (Single Chain):
-    operation → .recover() → .then() → success! (chain can continue)
-       ↓             ↓
-     error      recovers to value
-
-Dual-Path Handling (Convergent):
-    operation
-       ├─ success → success_handler ─┐
-       │                              ├─→ .next() → (chain can continue)
-       └─ error   → error_handler   ─┘
-
-Independent Branching (Mutually Exclusive):
-    operation ──────→ .then(A) → .then(B) → ...     (Success branch)
-       │
-       └───────────→ .otherwise(C) → .then(D) → ... (Error branch)
-
-    Only ONE branch executes
+┌─────────────────┐                    ┌──────────────────┐
+│  AsyncOp<T>     │                    │   Promise<T>     │
+│  (Future)       │                    │   (Promise)      │
+├─────────────────┤                    ├──────────────────┤
+│ Read-only       │                    │ Write-side       │
+│ Consumer side   │◄───────shares──────│ Producer side    │
+│                 │      State         │                  │
+│ .then()         │                    │ .resolveWith()   │
+│ .recover()      │                    │ .rejectWith()    │
+│ .onError()      │                    │ .isPending()     │
+└─────────────────┘                    └──────────────────┘
 ```
 
-### Key Insights
+**Key Points:**
+- **AsyncOp**: Read-only "Future" handle returned from async functions
+- **Promise**: `std::shared_ptr<State>` used to complete the operation
+- **Shared State**: Both reference the same underlying state object
+- **Terminology**: `AsyncOp` acts as the Future, `Promise` is the write-side (shared_ptr<State>)
 
-**Propagation Rules:**
-- **`.then()`**: Executes on success, **auto-propagates errors unchanged**
-- **`.recover()`** / **`.otherwise()`**: Execute on error, **auto-propagate successes unchanged**
-- **`.next()`**: Executes appropriate handler for **both** success and error, **always continues**
-- **`.onSuccess()`**: Executes on success, **terminates the chain** (no continuation)
-- **`.onError()`**: Executes on error, **terminates the chain** (no continuation)
+### ErrorCode Enum
 
-**Type Transformation:**
-- **`.then(T → U)`**: Can change type from T to U (value transformation)
-- **`.recover(error → T)`**: Must return same type T as the AsyncOp (error recovery)
-- **`.next((T → U), (error → U))`**: Both handlers must return same type U (convergence)
-- **`.otherwise(error → T)`**: Alias for `.recover()`, identical semantics
+```cpp
+namespace ao {
+    enum class ErrorCode {
+        None = 0,
+        Timeout,
+        NetworkError,
+        InvalidResponse,
+        Cancelled,
+        Exception,
+        MaxRetriesExceeded,
+        Unknown
+    };
+}
+```
+
+ErrorCode has built-in fmt/spdlog formatting:
+```cpp
+spdlog::error("Operation failed: {}", error_code);  // Prints "NetworkError", not "2"
+```
 
 ---
 
-## Promise/Future Semantics
+## Promise/Future Pattern
 
-### Understanding Promise vs Future
+### Creating Async Operations
 
-AsyncOp follows standard Promise/Future separation:
-
+**Method 1: Get promise from future**
 ```cpp
-// Creating an async operation
-ao::AsyncOp<int> fetchData() {
-    // Create the Future (return value)
+ao::AsyncOp<int> fetchDataAsync() {
     ao::AsyncOp<int> future;
     
-    // Get the Promise (to settle it later)
+    // Get the promise for settling
     ao::Promise<int> promise = future.promise();
     
-    // Schedule async work - capture promise, return future
+    // Schedule async work - capture promise
     ao::add_timeout(100ms, [promise]() {
-        promise->resolveWith(42);  // Promise settles the future
-        return false;  // G_SOURCE_REMOVE
+        promise->resolveWith(42);
+        return false;  // Single-shot timer
     });
     
-    return future;  // Consumer gets the future
+    return future;  // Return the future to caller
 }
-
-// Using the async operation
-fetchData()  // Returns AsyncOp<int> (Future)
-    .then([](int value) {  // React to the future value
-        spdlog::info("Got value: {}", value);
-    });
 ```
+
+**Method 2: Create promise first**
+```cpp
+ao::AsyncOp<int> fetchDataAsync() {
+    auto promise = ao::makePromise<int>();
+    
+    // Schedule async work
+    ao::add_timeout(100ms, [promise]() {
+        promise->resolveWith(42);
+        return false;
+    });
+    
+    return ao::AsyncOp<int>(promise);  // Construct from promise
+}
+```
+
+Both methods are equivalent - use whichever is clearer.
+
+### ⚠️ Critical Rule: Capture Promise, Not Future
+
+```cpp
+// ✅ CORRECT - Capture promise
+ao::AsyncOp<int> future;
+ao::add_timeout(100ms, [promise = future.promise()]() {
+    promise->resolveWith(42);
+    return false;
+});
+
+// ❌ WRONG - Don't capture future
+ao::AsyncOp<int> future;
+ao::add_timeout(100ms, [future]() {  // ❌ Can't settle it!
+    // future is read-only, no way to complete the operation
+    return false;
+});
+```
+
+**Why?** The `AsyncOp` (future) is read-only. Only the `Promise` has methods to settle the operation.
 
 ### Promise API
 
 ```cpp
-template<typename T>
-using Promise = std::shared_ptr<typename AsyncOp<T>::State>;
-
-// Promise methods (producer side):
-promise->resolveWith(T value);                       // Settle with success
-promise->rejectWith(ErrorCode error);                // Settle with error
-promise->isPending();                                // Query state
-promise->isResolved();
-promise->isRejected();
-promise->isSettled();
-promise->canOverwriteSuccessCallback();              // Check if success callback can be overwritten
-promise->canOverwriteErrorCallback();                // Check if error callback can be overwritten
-```
-
-**Key characteristics:**
-- **Idempotent**: Calling `resolveWith()` or `rejectWith()` multiple times is safe (ignored after first)
-- **Shared ownership**: `Promise<T>` is a `shared_ptr`, safe to capture in multiple callbacks
-- **Thread-safe creation**: Safe to create on any thread, but settlement must be on main thread
-
-### Future API
-
-```cpp
-// AsyncOp methods (consumer side):
-AsyncOp<T> future;
-
-// Getting the promise
-Promise<T> promise = future.promise();
-
-// Chaining (returns new AsyncOp with transformed type)
-future.then([](T value) -> U { ... });           // T → U transformation
-future.recover([](ErrorCode) -> T { ... });      // Error → T recovery
-future.otherwise([](ErrorCode) -> T { ... });    // Alias for recover()
-future.next(success_fn, error_fn);               // Dual-path convergence
-
-// Terminal handlers (no continuation)
-future.onError([](ErrorCode) { ... });
-
-// Utilities
-future.timeout(duration);                        // Add timeout
-future.tap([](const T&) { ... });                // Side effects
-future.finally([]() { ... });                    // Cleanup
-future.orElse(fallback_value);                   // Simple fallback
-
-// Static factories
-AsyncOp<T>::resolved(value);                     // Already resolved
-AsyncOp<T>::rejected(error);                     // Already rejected
+// State management
+promise->resolveWith(T value);           // Complete successfully
+promise->rejectWith(ErrorCode error);    // Complete with error
 
 // State queries
-future.isPending();
-future.isResolved();
-future.isRejected();
-future.isSettled();
-future.getError();  // Returns ErrorCode if rejected
+bool isPending();                        // Not yet settled
+bool isResolved();                       // Completed successfully
+bool isRejected();                       // Completed with error
+bool isSettled();                        // Either resolved or rejected
+
+// Callback management (advanced)
+bool canOverwriteSuccessCallback();      // Check if safe to set success handler
+bool canOverwriteErrorCallback();        // Check if safe to set error handler
 ```
 
-### Important: Single Callback Limitation
+**Properties:**
+- **Idempotent**: Calling `resolveWith/rejectWith` multiple times is safe (first call wins)
+- **Thread-safe creation**: Can create on any thread
+- **Settlement**: Must settle on main event loop thread (via `invoke_main` if needed)
 
-⚠️ **Unlike standard Promise/Future libraries, AsyncOp supports only ONE callback per operation type:**
-
-```cpp
-// ❌ WRONG: Second then() cannot overwrite first
-AsyncOp<int> op = fetchData();
-op.then([](int x) { spdlog::info("First: {}", x); });   // may work.
-op.then([](int x) { spdlog::info("Second: {}", x); });  // This will never run!
-
-// ❌ WRONG: Second onSuccess() cannot overwrite first
-AsyncOp<int> op = fetchData();
-op.onSuccess([](int x) { spdlog::info("First: {}", x); });   // may work.
-op.onSuccess([](int x) { spdlog::info("Second: {}", x); });  // This will never run!
-
-// ✅ CORRECT: Use .tap() for side effects without overwriting
-fetchData()
-    .tap([](int x) { spdlog::info("Logging: {}", x); })  // Side effect
-    .then([](int x) { return processData(x); })          // Main processing
-    .then([](Data d) { return saveData(d); });           // Continue chain
-
-// ✅ CORRECT: Create independent branches by capturing promise separately
-AsyncOp<int> op = fetchData();
-Promise<int> promise = op.promise();
-
-op.then([](int x) { processBranchA(x); });               // Success branch
-op.otherwise([](ErrorCode e) { processBranchB(e); });    // Error branch
-// Only ONE branch executes (mutually exclusive)
-
-// ✅ CORRECT: Use onSuccess() as terminal success handler
-fetchData()
-    .then([](int x) { return processResult(x); })
-    .onSuccess([](ProcessedData data) {                  // Terminal success handler
-        displayResult(data);
-    })
-    .onError([](ErrorCode err) {                         // Terminal error handler
-        handleError(err);
-    });
-// Only one of onSuccess() or onError() will execute
-```
-
-This design simplifies memory management for embedded systems. The library now includes callback overwrite protection that prevents accidental overwrites unless the previous callback was a propagation callback. The library will log an error if you attempt to overwrite a callback that is not safe to overwrite.
-
----
-
-## Basic Usage
-
-### Creating AsyncOp Operations
-
-#### From Your Async Functions
+### Factory Methods
 
 ```cpp
-ao::AsyncOp<Data> fetchDataAsync() {
-    ao::AsyncOp<Data> future;
-    ao::Promise<Data> promise = future.promise();
-    
-    // Schedule async work - always capture promise, never the future!
-    ao::add_timeout(100ms, [promise]() {
-        promise->resolveWith(Data{"hello"});
-        return false;  // G_SOURCE_REMOVE (single-shot timer)
-    });
-    
-    return future;  // Consumer gets the future
-}
-```
-
-**⚠️ CRITICAL:** Always capture `promise` (via `future.promise()`), never the `AsyncOp` itself!
-
-```cpp
-// ✅ CORRECT
-ao::AsyncOp<int> future;
-ao::Promise<int> promise = future.promise();
-add_timeout(ms, [promise]() { promise->resolveWith(42); });
-
-// ❌ WRONG - Don't capture the future
-add_timeout(ms, [future]() { /* How do we settle it? */ });
-```
-
-#### Alternative: Direct member access (for brevity)
-
-For convenience, you can access `m_promise` directly:
-
-```cpp
-ao::AsyncOp<Data> fetchDataAsync() {
-    ao::AsyncOp<Data> future;
-    
-    // Direct access to promise member
-    ao::add_timeout(100ms, [promise = future.m_promise]() {
-        promise->resolveWith(Data{"hello"});
-        return false;
-    });
-    
-    return future;
-}
-```
-
-Both styles are equivalent - use whichever is clearer in your codebase.
-
-#### Factory Methods
-
-```cpp
-// Create already-resolved future
+// Already resolved
 auto success = ao::AsyncOp<int>::resolved(42);
 
-// Create already-rejected future
+// Already rejected
 auto failure = ao::AsyncOp<int>::rejected(ao::ErrorCode::NetworkError);
 ```
 
-Perfect for:
+**Use cases:**
 - Testing async code with synchronous values
-- Returning cached/immediate results in async API
-- Short-circuiting async chains
+- Returning cached results from async APIs
+- Short-circuiting chains based on conditions
 
-### Chaining with then()
+---
+
+## API Reference
+
+### Chaining Methods
+
+#### `.then(f)` - Transform Success Values
+
+Transforms successful results to new values. Errors auto-propagate unchanged.
 
 ```cpp
-// Simple transformation
-fetchValue()
-    .then([](int x) {
-        spdlog::info("Got: {}", x);
-        return x * 2;  // Transform the value
-    })
-    .then([](int doubled) {
-        spdlog::info("Doubled: {}", doubled);
-    });
+template<typename F>
+auto then(F&& f) -> AsyncOp<U>;  // Where F: (T -> U) or (T -> AsyncOp<U>)
+```
 
-// Type transformation (int → string)
+**Returns:** New `AsyncOp<U>` with transformed type
+**Propagates:** Errors unchanged (auto-propagation)
+**Example:**
+```cpp
 fetchValue()
-    .then([](int x) -> std::string {
-        return std::to_string(x);
-    })
-    .then([](std::string s) {
-        spdlog::info("String: {}", s);
-    });
-
-// Chain async operations (returns AsyncOp, auto-unwraps)
-fetchUserId()
-    .then([](int id) -> ao::AsyncOp<User> {
-        return fetchUserAsync(id);  // Returns another AsyncOp
-    })
-    .then([](User user) -> ao::AsyncOp<Posts> {
-        return fetchUserPostsAsync(user.id);
-    })
-    .then([](Posts posts) {
-        displayPosts(posts);
+    .then([](int x) { return x * 2; })           // int -> int
+    .then([](int x) { return std::to_string(x); })  // int -> string
+    .then([](std::string s) { 
+        spdlog::info("Result: {}", s); 
     });
 ```
+
+**Async chaining** (auto-unwraps nested AsyncOp):
+```cpp
+fetchUserId()
+    .then([](int id) -> ao::AsyncOp<User> {
+        return fetchUserAsync(id);  // Returns AsyncOp<User>
+    })
+    .then([](User user) {  // Automatically unwrapped!
+        displayUser(user);
+    });
+```
+
+#### `.recover(f)` - Convert Error to Success
+
+Catches errors and provides fallback values. Success values auto-propagate unchanged.
+
+```cpp
+template<typename F>
+auto recover(F&& f) -> AsyncOp<T>;  // Where F: (ErrorCode -> T) or (ErrorCode -> AsyncOp<T>)
+```
+
+**Returns:** New `AsyncOp<T>` (same type)
+**Propagates:** Success values unchanged (auto-propagation)
+**Handler returns:**
+- `T` or `AsyncOp<T>`: Recovery succeeds, becomes success
+- `throw ErrorCode`: Propagate error (same or different)
+
+**Example:**
+```cpp
+fetchFromCache()
+    .recover([](ErrorCode err) {
+        if (err == ErrorCode::Timeout) {
+            return getCachedData();  // Recover to success
+        }
+        throw err;  // Propagate other errors
+    })
+    .then([](Data d) {  // Runs for both cache hit and recovery
+        processData(d);
+    });
+```
+
+#### `.otherwise(f)` - Branching Semantics
+
+Semantic alias for `.recover()` - identical implementation, different intent.
+
+```cpp
+template<typename F>
+auto otherwise(F&& f) -> AsyncOp<T>;  // Alias for recover()
+```
+
+**Use `.recover()`** when: Fixing an error to continue on same path
+**Use `.otherwise()`** when: Taking alternative path on error
+
+**Branching pattern:**
+```cpp
+auto op = fetchFromCache(key);
+
+// Success branch
+op.then([](Data data) { return processData(data); })
+  .then([](Result r) { displayResult(r); });
+
+// Error branch (alternative path)
+op.otherwise([](ErrorCode err) { return fetchFromDatabase(key); })
+  .then([](Data data) { return validateData(data); })
+  .then([](Data data) { cacheData(data); });
+
+// Only ONE branch executes
+```
+
+#### `.next(success_fn, error_fn)` - Dual-Path Convergence
+
+Handles both success and error with different logic, converging to same result type.
+
+```cpp
+template<typename SuccessF, typename ErrorF>
+auto next(SuccessF&& success_fn, ErrorF&& error_fn) -> AsyncOp<U>;
+// Where: (T -> U) and (ErrorCode -> U) must return same type U
+```
+
+**Key concept:** The "next step" regardless of previous result
+
+**Returns:** New `AsyncOp<U>` 
+**Requirement:** Both handlers must return same type `U`
+
+**Example:**
+```cpp
+fetchUser(id)
+    .next(
+        // Success path
+        [](User user) {
+            spdlog::info("Found user: {}", user.name);
+            return user;
+        },
+        // Error path
+        [](ErrorCode err) {
+            spdlog::warn("User not found: {}, using default", err);
+            return User::defaultUser();
+        }
+    )
+    .then([](User user) {
+        // Always executes with a User (from either path)
+        displayUser(user);
+    });
+```
+
+**When to use:**
+- Need guaranteed result regardless of success/failure
+- Different processing, same output type
+- Cleaner than `.then().recover()` when types align
+
+### Terminal Handlers
+
+#### `.onSuccess(f)` - Terminal Success Handler
+
+Sets final success handler without creating new AsyncOp. **Terminates the chain.**
+
+```cpp
+AsyncOp<T>& onSuccess(std::function<void(T)> handler);
+```
+
+**Returns:** Reference to `*this` (for chaining with `.onError()`)
+**Memory optimization:** No unused AsyncOp allocation
+
+**Example:**
+```cpp
+fetchData()
+    .then(processData)
+    .onSuccess([](Result r) {
+        // Terminal handler - efficient, no unused AsyncOp
+        displayResult(r);
+    })
+    .onError([](ErrorCode err) {
+        handleError(err);
+    });
+```
+
+**Why use onSuccess() over then()?**
+```cpp
+// Less efficient: creates unused AsyncOp
+fetchData().then(process).then([](Result r) { display(r); });
+//                              ^^^ Returns AsyncOp that's never used
+
+// More efficient: no unused allocation
+fetchData().then(process).onSuccess([](Result r) { display(r); });
+//                                   ^^^ No AsyncOp created
+```
+
+#### `.onError(f)` - Terminal Error Handler
+
+Sets final error handler without creating new AsyncOp. **Terminates the chain.**
+
+```cpp
+AsyncOp<T>& onError(std::function<void(ErrorCode)> handler);
+```
+
+**Returns:** Reference to `*this`
+**Can be used:**
+1. As end-of-chain: `.then().onError()`
+2. Before then(): `.onError().then()` (sets error handler, then continues)
+
+**Example:**
+```cpp
+// Pattern 1: End of chain
+fetchData()
+    .then(process)
+    .onSuccess([](Result r) { display(r); })
+    .onError([](ErrorCode e) { logError(e); });
+
+// Pattern 2: Set error handler mid-chain
+fetchData()
+    .onError([](ErrorCode e) { logError(e); })
+    .then([](Data d) { return process(d); });  // Success path continues
+```
+
+### Filtering Methods
+
+#### `.filter(success_fn, error_fn)` - Dual-Path Filtering
+
+Validates/transforms both success and error paths using throw/return semantics.
+
+```cpp
+template<typename SuccessF, typename ErrorF>
+auto filter(SuccessF&& success_fn, ErrorF&& error_fn) -> AsyncOp<T>;
+```
+
+**Throw/Return semantics:**
+- **Success filter:** Return `T` to pass, throw `ErrorCode` to reject
+- **Error filter:** Return `T` to recover, throw `ErrorCode` to propagate
+
+**Example:**
+```cpp
+fetchUser(id).filter(
+    // Success filter: validate
+    [](User user) -> User {
+        if (!user.isValid()) {
+            throw ErrorCode::InvalidResponse;
+        }
+        return user;  // Validated
+    },
+    // Error filter: recover from timeout
+    [](ErrorCode err) -> User {
+        if (err == ErrorCode::Timeout) {
+            return getCachedUser();  // Convert to success
+        }
+        throw err;  // Propagate other errors
+    }
+);
+```
+
+#### `.filterSuccess(f)` - Success-Only Filtering
+
+Convenience wrapper when only success needs filtering. Errors propagate unchanged.
+
+```cpp
+template<typename SuccessF>
+auto filterSuccess(SuccessF&& success_fn) -> AsyncOp<T>;
+```
+
+**Example:**
+```cpp
+fetchData()
+    .filterSuccess([](Data data) -> Data {
+        if (data.size() == 0) {
+            throw ErrorCode::InvalidResponse;
+        }
+        return data.normalize();  // Transform and pass through
+    });
+```
+
+#### `.filterError(f)` - Error-Only Filtering
+
+Convenience wrapper when only errors need handling. Success values propagate unchanged.
+
+```cpp
+template<typename ErrorF>
+auto filterError(ErrorF&& error_fn) -> AsyncOp<T>;
+```
+
+**Example:**
+```cpp
+operation()
+    .filterError([](ErrorCode err) -> Data {
+        if (err == ErrorCode::Timeout) {
+            return cachedData;  // Recover
+        }
+        spdlog::error("Error: {}", err);
+        throw err;  // Propagate after logging
+    });
+```
+
+### Side Effect Methods
+
+#### `.tap(f)` - Success Side Effect
+
+Execute side effect without modifying the value. Value passes through unchanged.
+
+```cpp
+template<typename F>
+AsyncOp<T> tap(F&& side_effect_fn);  // Where F: (T -> void) or (const T& -> void)
+```
+
+**Properties:**
+- Value passes through unchanged
+- Exceptions caught and logged (don't break chain)
+- Use for logging, metrics, debugging
+
+**Example:**
+```cpp
+fetchUser(id)
+    .tap([](const User& u) {
+        spdlog::debug("Fetched user: {}, age: {}", u.name, u.age);
+        metrics.increment("users_fetched");
+    })
+    .then([](User u) { return processUser(u); });
+```
+
+#### `.tapError(f)` - Error Side Effect
+
+Execute side effect on error without modifying it. Error passes through unchanged.
+
+```cpp
+template<typename F>
+AsyncOp<T> tapError(F&& side_effect_fn);  // Where F: (ErrorCode -> void)
+```
+
+**Properties:**
+- Error passes through unchanged
+- Exceptions caught and logged
+- Use for error logging, metrics
+
+**Example:**
+```cpp
+operation()
+    .tapError([](ErrorCode err) {
+        spdlog::error("Operation failed: {}", err);
+        metrics.increment("operation_errors");
+    })
+    .recover([](ErrorCode err) {
+        return getDefaultValue();
+    });
+```
+
+### Cleanup & Utility Methods
+
+#### `.finally(f)` - Cleanup Regardless of Outcome
+
+Executes cleanup function whether operation succeeds or fails. Result preserved.
+
+```cpp
+template<typename F>
+AsyncOp<T> finally(F&& cleanup_fn);  // Where F: (void -> void)
+```
+
+**Properties:**
+- Executes on both success and error
+- Original result/error preserved and propagated
+- Cleanup executes exactly once
+- Exceptions in cleanup caught and logged
+
+**Example:**
+```cpp
+openFile(path)
+    .then([](File f) { return readData(f); })
+    .finally([file]() {
+        file.close();
+        spdlog::debug("File closed");
+    })
+    .then([](Data d) { processData(d); });
+```
+
+#### `.timeout(duration)` - Add Timeout
+
+Creates new AsyncOp that rejects with `ErrorCode::Timeout` if duration elapses.
+
+```cpp
+AsyncOp<T> timeout(std::chrono::milliseconds duration);
+```
+
+**⚠️ CRITICAL:** Timer starts **immediately** when `.timeout()` is called
+
+**Example:**
+```cpp
+// Timeout applies to BOTH op1 and op2 (timer starts immediately)
+op1().then([](){ return op2(); }).timeout(3000ms);
+
+// Timeout applies only to op2 (timer starts when op2 begins)
+op1().then([](){ return op2().timeout(3000ms); });
+```
+
+**Timeline:**
+```
+// Case 1: .timeout() after chain
+op1().then(op2).timeout(3000ms)
+|-- op1 starts
+|   timeout() called, timer starts ⏱️
+|--- op1 completes (500ms)
+|       op2 starts
+|------- op2 completes (800ms total) ✓
+
+// Case 2: .timeout() on inner op
+op1().then([]{ return op2().timeout(3000ms); })
+|-- op1 starts (no timer)
+|--- op1 completes (could be 10 seconds)
+|       op2().timeout() called, timer starts ⏱️
+|--------- op2 completes (500ms) ✓
+```
+
+#### `.cancel(code)` - Cancel Operation
+
+Rejects pending operation with specified error code. No-op if already settled.
+
+```cpp
+AsyncOp<T>& cancel(ErrorCode code = ErrorCode::Cancelled);
+```
+
+**⚠️ Important:** Only cancels AsyncOp state machine, not underlying operation.
+
+**Example:**
+```cpp
+auto op = fetchLargeFile(url);
+
+onCancelButtonClicked([op]() {
+    op.cancel();  // Rejects with ErrorCode::Cancelled
+});
+
+op.then([](File f) { processFile(f); })
+  .onError([](ErrorCode err) {
+      if (err == ErrorCode::Cancelled) {
+          spdlog::info("User cancelled download");
+      }
+  });
+```
+
+### State Query Methods
+
+```cpp
+bool isPending() const;      // Not yet settled
+bool isResolved() const;     // Completed successfully
+bool isRejected() const;     // Completed with error
+bool isSettled() const;      // Either resolved or rejected
+ErrorCode errorCode() const; // Get error (if rejected)
+id_type id() const;          // Get unique operation ID (for logging)
+```
+
+---
+
+## Chaining Operations
+
+### Sequential Chaining
+
+```cpp
+fetchUserId()
+    .then([](int id) { return fetchUser(id); })
+    .then([](User u) { return fetchPosts(u.id); })
+    .then([](Posts p) { displayPosts(p); })
+    .onError([](ErrorCode e) { handleError(e); });
+
+// Type flow: AsyncOp<int> -> AsyncOp<User> -> AsyncOp<Posts> -> void
+```
+
+### Branching Pattern
+
+Create independent success and error branches from same operation:
+
+```cpp
+auto op = fetchFromCache(key);
+
+// Success branch
+op.then([](Data data) { return processForUI(data); })
+  .then([](UIData ui) { displayUI(ui); });
+
+// Error branch (alternative path)
+op.otherwise([](ErrorCode err) { return fetchFromDB(key); })
+  .then([](Data data) { return processForCache(data); })
+  .then([](Data data) { updateCache(data); });
+
+// Only ONE branch executes (mutually exclusive)
+```
+
+### Mixed Chaining
+
+```cpp
+operation()
+    .tap([](Result r) { log Debug("Got: {}", r); })      // Side effect
+    .then([](Result r) { return process(r); })         // Transform
+    .filterSuccess([](Data d) -> Data {                // Validate
+        if (!d.isValid()) throw ErrorCode::InvalidResponse;
+        return d;
+    })
+    .timeout(5000ms)                                   // Add timeout
+    .recover([](ErrorCode e) { return getDefault(); }) // Fallback
+    .finally([]() { cleanup(); })                      // Cleanup
+    .then([](Data d) { display(d); });                // Final action
+```
+
+---
+
+## Error Handling
 
 ### Basic Error Handling
 
 ```cpp
 operation()
-    .then([](Result r) {
-        // Success path
-        return processResult(r);
-    })
-    .onError([](ao::ErrorCode err) {
-        // Error path (terminal - no continuation)
-        spdlog::error("Operation failed: {}", err);
-    });
-
-// Using onSuccess() for terminal success handling
-operation()
-    .then([](Result r) {
-        // Success path - transform or continue chain
-        return processResult(r);
-    })
-    .onSuccess([](ProcessedResult result) {
-        // Terminal success handler (no continuation)
-        displayResult(result);
-    })
-    .onError([](ao::ErrorCode err) {
-        // Terminal error handler (no continuation)
-        spdlog::error("Operation failed: {}", err);
-    });
-// Only one of onSuccess() or onError() will execute
-```
-
-### Essential Utilities
-
-#### timeout()
-
-Add timeout to any operation:
-
-```cpp
-fetchFromServer()
-    .timeout(std::chrono::seconds(5))
-    .then([](Data d) {
-        // Got data within 5 seconds
-        processData(d);
-    })
-    .onError([](ao::ErrorCode err) {
-        if (err == ao::ErrorCode::Timeout) {
-            spdlog::error("Server didn't respond in time");
-        }
-    });
-```
-
-**⚠️ IMPORTANT: Timer starts immediately when `timeout()` is called**, not when the previous operation completes.
-
-```cpp
-// Timeout applies to BOTH op1 AND op2 combined (timer starts immediately when timeout() is called)
-// Total time from op1 start through op2 completion must be < 3000ms
-op1().then([](){ return op2(); }).timeout(3000ms);
-
-// Timeout applies ONLY to op2 (timer starts when op2's chain is set up)
-// op1 can take any amount of time; op2 must complete within 3000ms of starting
-op1().then([](){ return op2().timeout(3000ms); });
-```
-
-**Timeline visualization:**
-
-```
-// Case 1: .then().timeout() - timer covers entire chain
-op1().then([](){ return op2(); }).timeout(3000ms)
-
-Timeline:
-|-- op1 starts
-|   timeout() called, timer starts NOW ⏱️
-|--- op1 completes (500ms elapsed)
-|       .then() callback runs, op2 starts
-|------- op2 completes (800ms total) ✓ Success (under 3000ms)
-
-If op1 takes 2500ms and op2 takes 1000ms:
-|-- op1 starts
-|   timeout() called, timer starts ⏱️
-|----- op1 completes (2500ms elapsed)
-|         .then() callback runs, op2 starts
-|----------- TIMEOUT fires at 3000ms! ✗ op2 cancelled
-
-
-// Case 2: .then(op2().timeout()) - timer covers only inner operation
-op1().then([](){ return op2().timeout(3000ms); })
-
-Timeline:
-|-- op1 starts
-|--- op1 completes (could be 10 seconds, no timeout yet)
-|       op2().timeout() called, timer starts NOW ⏱️
-|--------- op2 completes (500ms) ✓ Success
-```
-
-#### tap()
-
-Execute side effects without modifying the value:
-
-```cpp
-operation()
-    .tap([](const Result& r) {
-        // Side effects - value passes through unchanged
-        spdlog::info("Got result, size: {}", r.size);
-        recordMetric("operation_success");
-    })
-    .then([](Result r) {
-        // r is unchanged from before tap()
-        processResult(r);
-    });
-```
-
-**Use cases:**
-- Logging
-- Metrics collection
-- Debug breakpoints
-- Validation (throw to convert to error)
-
-#### tapError()
-
-Execute side effects on error without modifying the error:
-
-```cpp
-operation()
-    .tapError([](ao::ErrorCode err) {
-        // Side effects - error passes through unchanged
-        spdlog::error("Operation failed with error: {}", err);
-        recordMetric("operation_failure");
-    })
-    .onError([](ao::ErrorCode err) {
-        // err is unchanged from before tapError()
-        handleError(err);
-    });
-```
-
-**Use cases:**
-- Error logging
-- Error metrics collection
-- Debug breakpoints for errors
-- Equivalent to: `filterError([](ErrorCode err) { side_effect_fn(err); throw err; })`
-
-**Note:** Exceptions caught in the side effect are logged but don't affect the chain - the original error continues to propagate.
-
-#### finally()
-
-Always execute cleanup code:
-
-```cpp
-auto lock = acquireLock();
-
-operation()
-    .then([](Result r) {
-        return processResult(r);
-    })
-    .finally([lock]() {
-        // Always executes, regardless of success or failure
-        releaseLock(lock);
-    })
-    .onError([](ao::ErrorCode err) {
-        // Lock already released by finally()
+    .then([](Result r) { return process(r); })
+    .onError([](ErrorCode err) {
         spdlog::error("Failed: {}", err);
     });
 ```
 
-#### cancel()
-
-Cancel a pending operation with a configurable error code:
-
-```cpp
-// Cancel with default error (ErrorCode::Cancelled)
-auto op = fetchData();
-cancelButton.clicked.connect([&op]() {
-    op.cancel();  // Rejects with ErrorCode::Cancelled
-});
-
-// Cancel with custom error code
-op.cancel(ao::ErrorCode::NetworkError);
-
-// Chain after cancel
-op.cancel()
-    .onError([](ao::ErrorCode err) {
-        spdlog::warn("Operation cancelled: {}", err);
-    });
-```
-
-**Important notes:**
-- `cancel()` only rejects the AsyncOp state, not underlying operations
-- For timer-based operations, you must clean up resources manually:
-
-```cpp
-// Typical timer pattern with cleanup
-auto timer_op = ao::AsyncOp<Data>();
-auto timer_id = add_timeout(5000ms, [timer_op]() {
-    timer_op.m_promise->resolveWith(data);
-    return false;
-});
-
-// Cancel button handler
-cancelButton.clicked.connect([&timer_op, timer_id]() {
-    ao::remove_timeout(timer_id);  // Manual cleanup
-    timer_op.cancel();             // Reject the AsyncOp
-});
-```
-
----
-
-## Advanced Filtering with filter()
-
-The `filter()` method provides unified handling for both success and error paths with a single call.
-
-### Dual-Path Filtering
-
-```cpp
-operation()
-    .filter(
-        [](Result& r) -> Result {
-            // Success filter: validate and pass through
-            if (!r.isValid()) {
-                throw ao::ErrorCode::InvalidResponse;  // Reject
-            }
-            return std::move(r);  // Pass through (use std::move to avoid copy)
-        },
-        [](ao::ErrorCode err) -> Result {
-            // Error filter: recover from specific errors
-            if (err == ao::ErrorCode::Timeout) {
-                return getCachedResult();  // Recover with cached data
-            }
-            throw err;  // Propagate other errors
-        }
-    )
-    .then([](Result r) {
-        // Receives result from either success path or error recovery
-        processResult(r);
-    });
-```
-
-### Success Filter Only
-
-Use filterSuccess and propagate errors unchanged:
-
-```cpp
-fetchData()
-    .filterSuccess(
-        [](Data& d) -> Data {
-            if (d.empty()) throw ao::ErrorCode::InvalidResponse;
-            return std::move(d);
-        } // Errors propagate unchanged
-    )
-    .onError([](ao::ErrorCode err) {
-        // Catches both fetch errors and validation errors
-        handleAllErrors(err);
-    });
-```
-
-### Error Filter Only
-
-Use filterError to pass success values unchanged:
-
-```cpp
-fetchData()
-    .filterError(  // Success propagates unchanged
-        [](ao::ErrorCode err) -> Data {
-            // Recovery logic - equivalent to recoverFrom() but more flexible
-            if (err == ao::ErrorCode::NetworkError) {
-                return getFallbackData();
-            }
-            throw err;  // Propagate other errors
-        }
-    )
-    .then([](Data d) {
-        processData(d);
-    });
-```
-
-### Migration from recoverFrom()
-
-`filterError()` provides a cleaner API for error-only handling:
-
-```cpp
-// Old: recoverFrom (deprecated)
-op.recoverFrom(ao::ErrorCode::Timeout, [](ErrorCode err) {
-    return defaultValue;
-});
-
-// New: filterError (recommended)
-op.filterError([](ao::ErrorCode err) -> T {
-    if (err == ao::ErrorCode::Timeout) return defaultValue;
-    throw err;  // propagate other errors
-});
-```
-
-### filterSuccess() and filterError()
-
-Convenience wrappers for single-path filtering:
-
-```cpp
-// Validate success result, errors propagate unchanged
-op.filterSuccess([](Data& d) -> Data {
-    if (!isValid(d)) throw ao::ErrorCode::InvalidResponse;
-    return std::move(d);
-});
-
-// Handle specific errors, success propagates unchanged
-op.filterError([](ao::ErrorCode err) -> Data {
-    if (err == ao::ErrorCode::Timeout) return getCachedData();
-    throw err;  // propagate other errors
-});
-```
-
-### filter() Callback Semantics
-
-| Filter Path | Return Value | Throw ErrorCode |
-|-------------|--------------|-----------------|
-| Success     | Pass value through | Reject with error |
-| Error       | Recover with value | Propagate error |
-
-**Move semantics:** For expensive-to-copy types, use `std::move()` on return:
-
-```cpp
-.filterSuccess([](LargeObject& obj) -> LargeObject {
-    if (!isValid(obj)) throw ao::ErrorCode::InvalidResponse;
-    return std::move(obj);  // Avoid copy
-})
-```
-
----
-
-## Error Handling & Recovery
-
-AsyncOp provides multiple powerful patterns for handling errors and recovering from failures.
-
-### Single-Path Recovery: recover() / otherwise()
-
-Convert errors back to success values and continue the chain.
-
-#### Basic Error Recovery
+### Error Recovery
 
 ```cpp
 fetchFromServer()
-    .recover([](ao::ErrorCode err) -> Data {
-        spdlog::warn("Server failed ({}), using cache", err);
-        return getCachedData();  // Convert error → success
+    .recover([](ErrorCode err) {
+        if (err == ErrorCode::Timeout) {
+            return getCachedData();
+        }
+        throw err;  // Propagate other errors
     })
-    .then([](Data d) {
-        // d is from either server (success) or cache (recovered)
-        processData(d);
-    });
+    .then([](Data d) { processData(d); });
 ```
 
-#### Cascading Fallbacks
-
-```cpp
-fetchFromPrimary()
-    .recover([](ao::ErrorCode err) -> ao::AsyncOp<Data> {
-        spdlog::warn("Primary failed ({}), trying secondary", err);
-        return fetchFromSecondary();  // Return AsyncOp - auto-unwrapped
-    })
-    .recover([](ao::ErrorCode err) -> Data {
-        spdlog::warn("Secondary failed ({}), using cache", err);
-        return getCachedData();  // Final fallback
-    })
-    .then([](Data d) {
-        // d from primary, secondary, or cache
-        processData(d);
-    });
-```
-
-#### Conditional Recovery (Specific Errors)
+### Conditional Error Handling
 
 ```cpp
 operation()
-    .recoverFrom(ao::ErrorCode::NetworkError, [](ao::ErrorCode err) {
-        return retryOperation();  // Only recover from network errors
-    })
-    // Other errors propagate unchanged
-    .onError([](ao::ErrorCode err) {
-        // Handle non-network errors
-        spdlog::error("Unrecoverable error: {}", err);
-    });
-```
-
-#### otherwise() - Semantic Alias
-
-`otherwise()` is identical to `recover()` but expresses branching intent:
-
-```cpp
-// recover() - expresses error recovery
-parseConfig()
-    .recover([](ao::ErrorCode) {
-        return getDefaultConfig();  // Recover from parse failure
-    });
-
-// otherwise() - expresses alternative path
-fetchFromCache(key)
-    .otherwise([](ao::ErrorCode) {
-        return fetchFromDatabase(key);  // If not in cache, try DB
-    });
-```
-
-Use whichever name better expresses your code's intent.
-
-### Dual-Path Convergence: next()
-
-Handle success and error differently, then converge to same type:
-
-```cpp
-fetchUserData(userId)
-    .next(
-        // Success handler: process real data
-        [](UserData data) -> DisplayData {
-            return DisplayData{
-                .name = data.name,
-                .status = "Online",
-                .data = processUserData(data)
-            };
-        },
-        // Error handler: create placeholder
-        [](ao::ErrorCode err) -> DisplayData {
-            spdlog::warn("User data unavailable: {}", err);
-            return DisplayData{
-                .name = "Unknown User",
-                .status = "Offline",
-                .data = {}
-            };
+    .filterError([](ErrorCode err) -> Data {
+        switch (err) {
+            case ErrorCode::Timeout:
+                return cachedData;
+            case ErrorCode::NetworkError:
+                spdlog::warn("Network error, retrying...");
+                throw err;  // Will be caught by next handler
+            default:
+                throw err;
         }
-    )
-    .then([](DisplayData display) {
-        // Single path - display either real or placeholder data
-        showUserDisplay(display);
+    })
+    .recover([](ErrorCode err) {
+        return Data::defaultValue();
     });
 ```
 
-**When to use `.next()`:**
-- Different processing for success/error, but same continuation point
-- UI display with real data or placeholders
-- Analytics with actual metrics or estimated values
-- Both paths produce valid (different) results
-
-### Independent Branching: Success vs Error Paths
-
-Create mutually exclusive branches from a single operation:
+### Error Transformation
 
 ```cpp
-auto op = fetchData();
-
-// Success branch
-op.then([](Data d) {
-    return validateData(d);
-})
-.then([](ValidData vd) {
-    return saveToDatabase(vd);
-})
-.then([](SaveResult r) {
-    spdlog::info("Data saved successfully");
-});
-
-// Error branch (completely independent)
-op.otherwise([](ao::ErrorCode err) {
-    return logErrorToMonitoring(err);
-})
-.then([](LogResult lr) {
-    return sendErrorNotification(lr);
-})
-.then([]() {
-    spdlog::info("Error logged and notified");
-});
-
-// Only ONE branch executes (success XOR error)
-```
-
-### Simple Fallback: orElse()
-
-Provide a default value if operation fails:
-
-```cpp
-fetchUserPreferences(userId)
-    .orElse(
-        getDefaultPreferences(),  // Fallback value
-        "User preferences unavailable"  // Optional log message
-    )
-    .then([](Preferences prefs) {
-        // prefs is either user's or default
-        applyPreferences(prefs);
+operation()
+    .recover([](ErrorCode err) -> ao::AsyncOp<Data> {
+        // Transform error into new async operation
+        if (err == ErrorCode::NotFound) {
+            return createNewData();  // Returns AsyncOp<Data>
+        }
+        throw err;
     });
 ```
 
-### Error Code Reference
+### Error Propagation
+
+Errors automatically propagate through `.then()` chains:
 
 ```cpp
-enum class ErrorCode {
-    None,                // No error (should not occur in error handlers)
-    Timeout,            // Operation timed out
-    NetworkError,       // Network communication failed
-    InvalidResponse,    // Response validation failed
-    Cancelled,          // Operation was cancelled
-    Exception,          // Exception thrown in callback
-    MaxRetriesExceeded, // Retry limit reached
-    Unknown             // Unspecified error
-};
-```
-
-**fmt formatter provided:** Error codes automatically format to names:
-```cpp
-spdlog::error("Failed: {}", err);  // "Failed: NetworkError"
-// No need for static_cast<int>(err)
+step1()
+    .then([](A a) { return step2(a); })  // Error bypasses
+    .then([](B b) { return step3(b); })  // Error bypasses
+    .then([](C c) { return step4(c); })  // Error bypasses
+    .onError([](ErrorCode err) {
+        // Catches errors from any step
+        spdlog::error("Chain failed: {}", err);
+    });
 ```
 
 ---
 
 ## Collection Operations
 
-AsyncOp provides powerful utilities for working with collections of async operations.
+### `all()` - Wait for All Success
 
-### Sequential Processing
-
-Process items one at a time (useful for rate limiting or ordered execution).
-
-#### forEach() - Fail Fast
-
-```cpp
-std::vector<UserId> users = {1, 2, 3, 4, 5};
-
-ao::forEach(users, [](UserId id) {
-    return processUserAsync(id);
-})
-.then([]() {
-    spdlog::info("All users processed successfully");
-})
-.onError([](ao::ErrorCode err) {
-    spdlog::error("Failed on one user: {}", err);
-    // Remaining users NOT processed
-});
-```
-
-- **Behavior**: Stops on first error
-- **Use when**: All items must succeed, order matters
-
-#### forEachSettled() - Fault Tolerant
-
-```cpp
-std::vector<Item> items = loadItems();
-
-ao::forEachSettled(items, [](const Item& item) {
-    return processItemAsync(item);
-})
-.then([](std::vector<Item> failed) {
-    if (failed.empty()) {
-        spdlog::info("All items processed successfully");
-    } else {
-        spdlog::warn("{} items failed, retrying", failed.size());
-        return retryItems(failed);
-    }
-});
-```
-
-- **Behavior**: Processes ALL items, collects failures
-- **Returns**: `AsyncOp<std::vector<T>>` containing failed items
-- **Use when**: Want to retry failed items, best-effort processing
-
-#### map() - Transform Sequential
-
-```cpp
-std::vector<int> ids = {1, 2, 3};
-
-ao::map(ids, [](int id) -> ao::AsyncOp<User> {
-    return fetchUserAsync(id);
-})
-.then([](std::vector<User> users) {
-    spdlog::info("Loaded {} users", users.size());
-    displayUsers(users);
-})
-.onError([](ao::ErrorCode err) {
-    spdlog::error("Failed to load users: {}", err);
-});
-```
-
-- **Behavior**: Transform each item sequentially, stops on first error
-- **Returns**: `AsyncOp<std::vector<U>>` containing transformed items
-- **Use when**: Order matters, dependent transformations
-
-#### mapSettled() - Transform with Full Details
-
-```cpp
-ao::mapSettled(items, [](const Item& item) {
-    return transformItemAsync(item);
-})
-.then([](std::vector<ao::SettledResult<TransformedItem>> results) {
-    for (size_t i = 0; i < results.size(); ++i) {
-        if (results[i].isFulfilled()) {
-            processSuccess(results[i].value);
-        } else {
-            spdlog::error("Item {} failed: {}", i, results[i].error);
-        }
-    }
-});
-```
-
-- **Behavior**: Transforms ALL items, provides detailed results
-- **Returns**: `AsyncOp<std::vector<SettledResult<U>>>`
-- **Use when**: Need visibility into which items succeeded/failed
-
-### Parallel Processing
-
-Process multiple items simultaneously (much faster for independent operations).
-
-#### all() - Wait for All, Fail Fast
-
-```cpp
-std::vector<ao::AsyncOp<User>> ops = {
-    fetchUserAsync(1),
-    fetchUserAsync(2),
-    fetchUserAsync(3)
-};
-
-ao::all(ops)
-    .then([](std::vector<User> users) {
-        // All operations succeeded
-        spdlog::info("Loaded {} users", users.size());
-        displayUsers(users);
-    })
-    .onError([](ao::ErrorCode err) {
-        // At least one operation failed
-        spdlog::error("Failed to load all users: {}", err);
-    });
-```
-
-- **Behavior**: All start immediately, resolves when all succeed
-- **Fails**: On first error
-- **Use when**: All results needed, fail if any fails
-
-#### allSettled() - Wait for All, Get Details
-
-```cpp
-std::vector<ao::AsyncOp<Data>> ops = createOperations();
-
-ao::allSettled(ops)
-    .then([](std::vector<ao::SettledResult<Data>> results) {
-        int succeeded = 0, failed = 0;
-        for (const auto& r : results) {
-            if (r.isFulfilled()) {
-                processData(r.value);
-                succeeded++;
-            } else {
-                spdlog::error("Operation failed: {}", r.error);
-                failed++;
-            }
-        }
-        spdlog::info("Results: {} succeeded, {} failed", succeeded, failed);
-    });
-```
-
-- **Behavior**: All start immediately, waits for all to settle
-- **Never fails**: Always resolves with all results
-- **Use when**: Want full visibility, best-effort batch processing
-
-#### mapParallel() - Transform in Parallel
-
-```cpp
-std::vector<int> ids = {1, 2, 3, 4, 5};
-
-ao::mapParallel(ids, [](int id) {
-    return fetchUserAsync(id);
-})
-.then([](std::vector<User> users) {
-    spdlog::info("Loaded {} users in parallel", users.size());
-    displayUsers(users);
-});
-```
-
-- **Behavior**: Transforms all items simultaneously
-- **Returns**: `AsyncOp<std::vector<U>>` (results in input order)
-- **Use when**: Independent transformations, speed matters
-
-### Race Operations
-
-#### race() - First to Settle Wins
-
-```cpp
-std::vector<ao::AsyncOp<Data>> ops = {
-    fetchFromServerA(),
-    fetchFromServerB(),
-    fetchFromServerC()
-};
-
-ao::race(ops)
-    .then([](Data d) {
-        // First operation that completed (success or failure)
-        spdlog::info("Got data from fastest server");
-        processData(d);
-    })
-    .onError([](ao::ErrorCode err) {
-        // First operation completed with error
-        spdlog::warn("Fastest server failed: {}", err);
-    });
-```
-
-- **Behavior**: First to complete (success OR error) wins
-- **Use when**: Timeout scenarios, redundant requests
-
-#### any() - First Success Wins
-
-```cpp
-std::vector<ao::AsyncOp<Data>> ops = {
-    fetchFromPrimary(),
-    fetchFromSecondary(),
-    fetchFromCache()
-};
-
-ao::any(ops)
-    .then([](Data d) {
-        // First successful operation
-        spdlog::info("Got data from one source");
-        processData(d);
-    })
-    .onError([](ao::ErrorCode err) {
-        // ALL operations failed
-        spdlog::error("All sources failed, last error: {}", err);
-    });
-```
-
-- **Behavior**: First success wins, fails only if all fail
-- **Use when**: Fallback sources, redundancy patterns
-
-### Choosing the Right Collection Operation
-
-| Need | Sequential | Parallel |
-|------|-----------|----------|
-| **All succeed or fail** | `forEach()` | `all()` |
-| **Process all, collect failures** | `forEachSettled()` | `allSettled()` |
-| **Transform items** | `map()` | `mapParallel()` |
-| **Transform with details** | `mapSettled()` | _(use mapParallel + allSettled)_ |
-| **First to finish** | _(not applicable)_ | `race()` |
-| **First success** | _(not applicable)_ | `any()` |
-
----
-
-## Core API Reference
-
-### AsyncOp<T> Class
+Resolves when **all** operations succeed, rejects on **first** error.
 
 ```cpp
 template<typename T>
-class AsyncOp {
-public:
-    // Type alias for promise
-    using Promise = std::shared_ptr<State>;
-
-    // Construction
-    AsyncOp();                                    // Create pending operation
-    AsyncOp(const AsyncOp&) = default;            // Copy (shares state)
-    AsyncOp(AsyncOp&&) = default;                 // Move
-
-    // Static factories
-    static AsyncOp<T> resolved(T value);          // Create resolved
-    static AsyncOp<T> rejected(ErrorCode err);    // Create rejected
-
-    // State queries
-    bool isPending() const;
-    bool isResolved() const;
-    bool isRejected() const;
-    bool isSettled() const;
-    ErrorCode getError() const;
-    id_type id() const;                           // For logging/debugging
-
-    // Get promise for async callbacks
-    Promise<T> promise() const;
-    // Or direct member access:
-    Promise<T> m_promise;  // Public member
-    
-    // Chaining (returns new AsyncOp)
-    template<typename F>
-    auto then(F&& f) -> AsyncOp<U>;               // Success handler
-    // NOTE: Callback overwrite protection prevents overwriting existing success callbacks
-    // unless the previous callback was a propagation callback.
-    
-    template<typename F>
-    auto recover(F&& f) -> AsyncOp<T>;            // Error → value
-    // NOTE: Allows overwriting error callbacks when previous callback was for propagation.
-    
-    template<typename F>
-    auto otherwise(F&& f) -> AsyncOp<T>;          // Alias for recover
-    // NOTE: Allows overwriting error callbacks when previous callback was for propagation.
-    
-    template<typename SuccessF, typename ErrorF>
-    auto next(SuccessF&& s, ErrorF&& e) -> AsyncOp<U>;  // Dual-path
-    // NOTE: Callback overwrite protection applies to both success and error handlers.
-    
-    // Terminal handlers (no continuation)
-    AsyncOp<T>& onSuccess(std::function<void(T)> handler);
-    // NOTE: Callback overwrite protection prevents overwriting existing success callbacks
-    // unless the previous callback was a propagation callback.
-    // WARNING: Calling onSuccess() multiple times will be an error.
-    // WARNING: If not the last handler in chain, the next handler must be onError().
-
-    AsyncOp<T>& onError(std::function<void(ErrorCode)> handler);
-    // NOTE: Callback overwrite protection prevents overwriting existing error callbacks
-    // unless the previous callback was a propagation callback.
-    // WARNING: Calling onError() multiple times will be an error.
-    // WARNING: If chained after onSuccess(), it must be the end of chain.
-    // WARNING: If it is not end of chain, the next handler must be then().
-
-    template<typename F>
-    AsyncOp<T> tapError(F&& side_effect_fn);
-    // Execute side effect on error without modifying the error
-    // Useful for logging errors, metrics, debugging. Error passes through unchanged.
-    // Equivalent to: filterError([](ErrorCode err) { side_effect_fn(err); throw err; })
-
-    // Cancellation
-    AsyncOp<T>& cancel(ErrorCode code = ErrorCode::Cancelled);
-    // Rejects pending operation with specified error code
-    // Returns *this for chaining; no-op if already settled
-    // Note: Only cancels AsyncOp state, not underlying operations (timers, etc.)
-
-    // Utilities
-    AsyncOp<T> timeout(std::chrono::milliseconds duration);
-
-    template<typename F>
-    AsyncOp<T> tap(F&& side_effect_fn);           // Side effects
-    // NOTE: Does not prevent subsequent callback overwrites.
-
-    template<typename F>
-    AsyncOp<T> finally(F&& cleanup_fn);           // Cleanup
-    // NOTE: Callback overwrite protection allows overwriting propagation callbacks
-    // set by methods like recover() and finally().
-
-    template<typename SuccessF, typename ErrorF>
-    AsyncOp<T> filter(SuccessF&& successFilter, ErrorF&& errorFilter);
-    // Dual-path filtering for success and error handling
-    // Success filter: return T to pass, throw ErrorCode to reject
-    // Error filter: return T to recover, throw ErrorCode to propagate
-
-    // Deprecated methods
-    [[deprecated]] AsyncOp<T> orElse(T fallback_value, const std::string& log_msg = "");
-    // Use otherwise() with explicit fallback logic instead
-
-    template<typename F>
-    [[deprecated]] AsyncOp<T> recoverFrom(ErrorCode err, F&& handler);
-    // Use filter() with error filter only instead
-};
-
-### Chaining Rules and Constraints
-
-When using terminal handlers like `onSuccess()` and `onError()`, be aware of the following constraints:
-
-1. **`.onSuccess()` as terminal handler**: When using `onSuccess()` as a terminal success handler,
-   if it's not the last handler in the chain, the next handler must be `onError()`.
-
-2. **`.onError()` as terminal handler**: When using `onError()` as a terminal error handler,
-   if it's not the last handler in the chain, the next handler must be `then()`.
-
-3. **Callback overwrite protection**: Both `onSuccess()` and `onError()` follow the same 
-   overwrite protection rules as other handlers - they can only overwrite previous handlers
-   if no handler exists or if the previous handler was a propagation callback.
-
-```cpp
-// ✅ CORRECT: onSuccess followed by onError (valid combination)
-operation()
-    .then([](T val) { return process(val); })
-    .onSuccess([](ProcessedVal val) { display(val); })  // Terminal success handler
-    .onError([](ErrorCode err) { logError(err); });     // Next must be onError
-
-// ✅ CORRECT: onError followed by then (valid combination)  
-operation()
-    .then([](T val) { return process(val); })
-    .onError([](ErrorCode err) { logError(err); })      // Terminal error handler
-    .then([](T val) { return transform(val); });         // Next must be then
-
-// ❌ INCORRECT: onSuccess followed by then (invalid combination)
-operation()
-    .then([](T val) { return process(val); })
-    .onSuccess([](ProcessedVal val) { display(val); })  // Terminal success handler
-    .then([](T val) { return transform(val); });         // ERROR: Should be onError
+AsyncOp<std::vector<T>> all(std::vector<AsyncOp<T>> operations);
 ```
 
-### Promise<T> (Type Alias)
+**Example:**
+```cpp
+std::vector<ao::AsyncOp<Data>> ops = {
+    fetchData(1),
+    fetchData(2),
+    fetchData(3)
+};
+
+ao::all(std::move(ops))
+    .then([](std::vector<Data> results) {
+        // All succeeded - process all results
+        for (const auto& data : results) {
+            processData(data);
+        }
+    })
+    .onError([](ErrorCode err) {
+        // At least one failed
+        spdlog::error("Batch failed: {}", err);
+    });
+```
+
+### `any()` - Race for First Success
+
+Resolves with **first success**, rejects only if **all** fail.
 
 ```cpp
 template<typename T>
-using Promise = std::shared_ptr<typename AsyncOp<T>::State>;
-
-// State methods (via promise->)
-void resolveWith(T value);          // Settle with success (idempotent)
-void rejectWith(ErrorCode err);     // Settle with error (idempotent)
-
-bool isPending() const;
-bool isResolved() const;
-bool isRejected() const;
-bool isSettled() const;
+AsyncOp<T> any(std::vector<AsyncOp<T>> operations);
 ```
 
-### ErrorCode Enum
+**Example:**
+```cpp
+ao::any({
+    fetchFromServer1(),
+    fetchFromServer2(),
+    fetchFromServer3()
+})
+    .then([](Data data) {
+        // Got data from fastest server
+        processData(data);
+    })
+    .onError([](ErrorCode err) {
+        // All servers failed
+        spdlog::error("All servers failed");
+    });
+```
+
+### `race()` - First to Settle (Success or Error)
+
+Completes as soon as **any** operation settles (success OR failure).
 
 ```cpp
-enum class ErrorCode {
-    None,                // No error
-    Timeout,            // Operation timed out
-    NetworkError,       // Network communication failed
-    InvalidResponse,    // Response validation failed
-    Cancelled,          // Operation was cancelled
-    Exception,          // Exception thrown in callback
-    MaxRetriesExceeded, // Retry limit reached
-    Unknown             // Unspecified error
-};
-
-// Automatic formatting via fmt
-spdlog::error("Error: {}", err);  // Prints "Error: NetworkError"
+template<typename T>
+AsyncOp<T> race(std::vector<AsyncOp<T>> operations);
 ```
 
-### SettledResult<T> Struct
+**Difference from `any()`:**
+- `race()`: First to finish (success or error) wins
+- `any()`: First success wins, only fails if all fail
+
+**Example:**
+```cpp
+ao::race({
+    fetchWithTimeout(url, 1000ms),
+    ao::delay(5000ms).then([]() -> Data {
+        throw ErrorCode::Timeout;
+    })
+})
+    .then([](Data data) { processData(data); })
+    .onError([](ErrorCode err) { handleTimeout(); });
+```
+
+### `allSettled()` - Wait for All (Success and Failures)
+
+Waits for **all** operations to complete, returns results for both successes and failures.
 
 ```cpp
 template<typename T>
 struct SettledResult {
     enum Status { Fulfilled, Rejected };
-    
+    T value;           // Valid if Fulfilled
+    ErrorCode error;   // Valid if Rejected
     Status status;
-    T value;              // Valid if Fulfilled
-    ErrorCode error;      // Valid if Rejected
-    
-    bool isFulfilled() const;
-    bool isRejected() const;
 };
+
+template<typename T>
+AsyncOp<std::vector<SettledResult<T>>> allSettled(std::vector<AsyncOp<T>> operations);
+```
+
+**Example:**
+```cpp
+ao::allSettled({
+    fetchData(1),
+    fetchData(2),
+    fetchData(3)
+})
+    .then([](std::vector<ao::SettledResult<Data>> results) {
+        for (size_t i = 0; i < results.size(); ++i) {
+            if (results[i].isFulfilled()) {
+                spdlog::info("Item {}: success", i);
+                processData(results[i].value);
+            } else {
+                spdlog::warn("Item {}: failed with {}", 
+                             i, results[i].error);
+            }
+        }
+    });
+```
+
+### `map()` - Sequential Transformation
+
+Processes items **one at a time**, collects results. Fails on first error.
+
+```cpp
+template<typename T, typename F>
+auto map(const std::vector<T>& items, F&& transform) 
+    -> AsyncOp<std::vector<U>>;  // Where F: (T -> AsyncOp<U>)
+```
+
+**Example:**
+```cpp
+std::vector<int> ids = {1, 2, 3, 4, 5};
+
+ao::map(ids, [](int id) {
+    return fetchUser(id);  // Returns AsyncOp<User>
+})
+    .then([](std::vector<User> users) {
+        // All users fetched sequentially
+        displayUsers(users);
+    });
+```
+
+### `mapParallel()` - Parallel Transformation
+
+Processes items **simultaneously**, collects results. Fails on first error.
+
+```cpp
+template<typename T, typename F>
+auto mapParallel(const std::vector<T>& items, F&& transform)
+    -> AsyncOp<std::vector<U>>;
+```
+
+**Example:**
+```cpp
+std::vector<int> ids = {1, 2, 3, 4, 5};
+
+ao::mapParallel(ids, [](int id) {
+    return fetchUser(id);
+})
+    .then([](std::vector<User> users) {
+        // All users fetched in parallel
+        displayUsers(users);
+    });
+```
+
+### `forEach()` - Sequential Execution
+
+Executes operation for each item **sequentially**. Fails immediately on first error.
+
+```cpp
+template<typename T, typename F>
+AsyncOp<void> forEach(const std::vector<T>& items, F&& process);
+```
+
+**Example:**
+```cpp
+std::vector<File> files = getFiles();
+
+ao::forEach(files, [](File f) {
+    return processFile(f);  // Returns AsyncOp<void>
+})
+    .then([]() {
+        spdlog::info("All files processed");
+    });
+```
+
+### `forEachSettled()` - Sequential with Failed Items
+
+Processes **all** items sequentially, returns list of failed items.
+
+```cpp
+template<typename Item, typename F>
+AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& process);
+```
+
+**Example:**
+```cpp
+ao::forEachSettled(files, [](File f) {
+    return processFile(f);
+})
+    .then([](std::vector<File> failed_files) {
+        if (failed_files.empty()) {
+            spdlog::info("All files processed successfully");
+        } else {
+            spdlog::warn("{} files failed", failed_files.size());
+            retryFiles(failed_files);
+        }
+    });
+```
+
+### `mapSettled()` - Sequential with All Results
+
+Processes items **sequentially**, returns `SettledResult` for each (both successes and failures).
+
+```cpp
+template<typename Item, typename F>
+auto mapSettled(const std::vector<Item>& items, F&& transform)
+    -> AsyncOp<std::vector<SettledResult<U>>>;
+```
+
+**Example:**
+```cpp
+ao::mapSettled(urls, [](std::string url) {
+    return fetchUrl(url);
+})
+    .then([](std::vector<ao::SettledResult<Data>> results) {
+        for (const auto& result : results) {
+            if (result.isFulfilled()) {
+                processData(result.value);
+            } else {
+                spdlog::error("URL failed: {}", result.error);
+            }
+        }
+    });
 ```
 
 ---
 
-## Utility Functions
+## Advanced Patterns
 
-All utility functions are in the `ao::` namespace.
-
-### Basic Utilities
-
-```cpp
-// Delay execution
-ao::AsyncOp<void> delay(std::chrono::milliseconds duration);
-
-// Defer synchronous function to async
-template<typename F>
-auto defer(F&& f) -> AsyncOp<ReturnType>;
-
-// Example:
-ao::defer([]() {
-    return computeHeavyResult();  // Runs on next event loop iteration
-}).then([](Result r) {
-    processResult(r);
-});
-```
-
-### Retry with Backoff
+### Retry Pattern
 
 ```cpp
 template<typename T, typename F>
-AsyncOp<T> retryWithBackoff(
-    F&& operation,                       // Function returning AsyncOp<T>
-    int max_attempts,                    // Max tries (including first)
-    std::chrono::milliseconds initial_delay
-);
+AsyncOp<T> retry(F&& operation, int max_attempts);
 
-// Example:
-ao::retryWithBackoff(
-    []() { return fetchFromUnreliableServer(); },
-    3,                                   // Try up to 3 times
-    std::chrono::seconds(1)              // Start with 1s, then 2s, 4s...
-)
-.then([](Data d) {
-    spdlog::info("Succeeded after retry");
-    processData(d);
-})
-.onError([](ao::ErrorCode err) {
-    // err == MaxRetriesExceeded if all failed
-    spdlog::error("Failed after all retries: {}", err);
-});
+template<typename T, typename F>
+AsyncOp<T> retryWithBackoff(F&& operation, int max_attempts, 
+                           std::chrono::milliseconds initial_delay);
 ```
 
-### Poll Until Condition
-
+**Immediate retry:**
 ```cpp
-template<typename T, typename F, typename Pred>
-AsyncOp<T> pollUntil(
-    F&& operation,                       // Function returning AsyncOp<T>
-    Pred&& condition,                    // Predicate: bool(const T&)
-    int max_attempts,
-    std::chrono::milliseconds interval
-);
-
-// Example: Wait for job completion
-ao::pollUntil(
-    []() { return checkJobStatus(); },   // Returns AsyncOp<JobStatus>
-    [](const JobStatus& status) {        // Check condition
-        return status.isComplete();
-    },
-    20,                                  // Poll up to 20 times
-    std::chrono::seconds(5)              // Every 5 seconds
-)
-.then([](JobStatus status) {
-    spdlog::info("Job completed: {}", status.result);
-})
-.onError([](ao::ErrorCode err) {
-    spdlog::error("Job didn't complete in time");
-});
+ao::retry<Data>([]() {
+    return fetchFromServer();
+}, 3)
+    .then([](Data d) { processData(d); })
+    .onError([](ErrorCode err) {
+        if (err == ErrorCode::MaxRetriesExceeded) {
+            spdlog::error("All retries failed");
+        }
+    });
 ```
 
-### Event Loop Functions
+**Exponential backoff:**
+```cpp
+ao::retryWithBackoff<Data>([]() {
+    return fetchFromAPI();
+}, 3, 1000ms)  // Retry after 1s, 2s, 4s
+    .then([](Data d) { processData(d); });
+```
 
-Located in `ao_event_loop.hpp`:
+### Delay Pattern
 
 ```cpp
-// Schedule callback after timeout
-timer_type add_timeout(
-    std::chrono::milliseconds timeout,
-    std::function<bool()> cb              // Return false to cancel, true to repeat
-);
+AsyncOp<void> delay(std::chrono::milliseconds duration);
+```
 
-// Schedule callback on next event loop iteration
-timer_type add_idle(std::function<bool()> cb);
+**Example:**
+```cpp
+ao::delay(1000ms)
+    .then([]() {
+        spdlog::info("1 second later");
+    });
 
-// Cancel timer
-void remove_timeout(timer_type id);
+// Delayed retry
+operation()
+    .recover([](ErrorCode err) -> ao::AsyncOp<Data> {
+        return ao::delay(2000ms).then([]() {
+            return retryOperation();
+        });
+    });
+```
 
-// Thread utilities
-bool is_main_thread();                    // Check if on main thread
-void invoke_main(std::function<void()> cb);  // Execute on main thread
+### Defer Pattern
 
-// Backend info (for debugging)
-const char* get_backend_name();           // "GLib" or "Qt"
-std::string get_backend_version();        // Version string
+Execute synchronous function asynchronously on next event loop iteration.
+
+```cpp
+template<typename F>
+auto defer(F&& f) -> AsyncOp<ReturnType>;
+```
+
+**Example:**
+```cpp
+ao::defer([]() {
+    // Heavy computation
+    return expensiveCalculation();
+})
+    .then([](Result r) {
+        displayResult(r);
+    });
+```
+
+### Conditional Execution
+
+```cpp
+AsyncOp<Data> fetchData(bool use_cache) {
+    if (use_cache) {
+        return AsyncOp<Data>::resolved(getCached());
+    } else {
+        return fetchFromServer();
+    }
+}
+```
+
+### Combining Multiple Sources
+
+```cpp
+// Fetch from primary, fallback to secondary, finally use cache
+fetchFromPrimary()
+    .recover([](ErrorCode) { return fetchFromSecondary(); })
+    .recover([](ErrorCode) { return getCachedData(); })
+    .then([](Data d) { processData(d); });
+```
+
+### Parallel Execution with Dependencies
+
+```cpp
+auto user_op = fetchUser(id);
+auto settings_op = fetchSettings(id);
+
+ao::all({user_op, settings_op})
+    .then([](std::vector<std::any> results) {
+        // Both completed - now do something that needs both
+        User user = /* extract from results[0] */;
+        Settings settings = /* extract from results[1] */;
+        return initialize(user, settings);
+    });
 ```
 
 ---
 
 ## Thread Safety
 
-### Safe Patterns
+### Event Loop Threading Model
 
-#### Worker Thread → Main Thread
+AsyncOp is designed for **single-threaded event loop** environments (GLib/Qt main loop).
+
+**Thread-safe operations:**
+- Creating AsyncOp/Promise on any thread ✅
+- Querying state (`isPending()`, etc.) ✅
+- `add_timeout()`, `add_idle()`, `invoke_main()` ✅
+
+**Main thread required:**
+- Settling promises (`resolveWith()`, `rejectWith()`) ⚠️
+- Executing callbacks (`.then()`, `.onError()`, etc.) ⚠️
+
+### Cross-Thread Example
 
 ```cpp
-ao::AsyncOp<Result> computeAsync() {
-    ao::AsyncOp<Result> future;
-    ao::Promise<Result> promise = future.promise();
+ao::AsyncOp<Data> fetchDataFromWorker() {
+    auto promise = ao::makePromise<Data>();
     
-    // Spawn worker thread
     std::thread worker([promise]() {
-        // Heavy computation on worker thread
-        Result result = computeExpensiveResult();
+        Data data = expensiveComputation();
         
-        // Marshal result to main thread
-        ao::invoke_main([promise, result]() {
-            promise->resolveWith(result);
+        // Marshal back to main thread before settling
+        ao::invoke_main([promise, data]() {
+            promise->resolveWith(data);
         });
     });
     
-    worker.detach();  // Or join later
-    return future;
+    worker.detach();
+    return ao::AsyncOp<Data>(promise);
 }
 ```
 
-#### Using add_idle for Marshaling
-
-```cpp
-std::thread worker([promise]() {
-    auto result = compute();
-    
-    // Schedule on main thread's event loop
-    ao::add_idle([promise, result]() {
-        promise->resolveWith(result);
-        return false;  // G_SOURCE_REMOVE
-    });
-});
-```
-
-### Thread Safety Rules
-
-✅ **Safe from any thread:**
-- Creating `AsyncOp` / `Promise`
-- Copying `AsyncOp` / `Promise`
-- Calling `add_timeout()`, `add_idle()`, `remove_timeout()`
-- Calling `invoke_main()`
-- Calling `is_main_thread()`
-
-⚠️ **Must be on main thread:**
-- Calling `promise->resolveWith()` / `rejectWith()`
-- Calling `.then()`, `.onError()`, `.recover()`, etc.
-- Any callback execution (happens on main thread automatically)
-
-❌ **Never do from worker thread:**
-- Call `promise->resolveWith()` directly (use `invoke_main()` or `add_idle()`)
-- Access AsyncOp state queries (`isPending()`, etc.)
-- Rely on `.then()` callbacks firing synchronously
-
 ### invoke_main() Behavior
 
-**⚠️ IMPORTANT**: `invoke_main()` has different behavior based on calling thread:
+⚠️ **Important:** Behavior differs based on calling thread:
 
 ```cpp
-// From main thread → Executes SYNCHRONOUSLY (immediately)
-ao::invoke_main([]() {
-    spdlog::info("Runs immediately");
-});
-spdlog::info("After invoke_main");
-// Output: "Runs immediately" then "After invoke_main"
-
-// From worker thread → Executes ASYNCHRONOUSLY (via event loop)
-std::thread([]() {
-    ao::invoke_main([]() {
-        spdlog::info("Runs on main thread later");
-    });
-    spdlog::info("After invoke_main");
-}).join();
-// Output: "After invoke_main" then "Runs on main thread later"
+void invoke_main(std::function<void()> cb);
 ```
+
+- **Main thread:** Executes **synchronously** (immediately)
+- **Worker thread:** Executes **asynchronously** (via event loop)
 
 For **consistent async behavior**, use `add_idle()` directly:
 
 ```cpp
-ao::add_idle([]() {
-    spdlog::info("Always async, always on main thread");
-    return false;
+// Always async (even from main thread)
+ao::add_idle([promise, data]() {
+    promise->resolveWith(data);
+    return false;  // Single-shot
 });
 ```
 
@@ -1532,713 +1207,540 @@ ao::add_idle([]() {
 
 ## Best Practices
 
-### 1. Always Capture Promise, Never Future
+### 1. Always Capture Promise, Not Future
 
 ```cpp
 // ✅ CORRECT
-ao::AsyncOp<int> fetchData() {
-    ao::AsyncOp<int> future;
-    ao::Promise<int> promise = future.promise();  // Get promise
-    
-    ao::add_timeout(100ms, [promise]() {          // Capture promise
-        promise->resolveWith(42);
-        return false;
-    });
-    
-    return future;  // Return future
-}
+ao::AsyncOp<int> op;
+ao::add_timeout(100ms, [promise = op.promise()]() {
+    promise->resolveWith(42);
+    return false;
+});
 
 // ❌ WRONG
-ao::AsyncOp<int> fetchData() {
-    ao::AsyncOp<int> future;
-    
-    ao::add_timeout(100ms, [future]() {           // ❌ Capturing future!
-        // How do we settle it?
-        future.???  // No resolveWith() method on future
-        return false;
-    });
-    
-    return future;
-}
+ao::add_timeout(100ms, [op]() {  // Can't settle!
+    return false;
+});
 ```
 
-### 2. Use Descriptive Error Codes
+### 2. Use onSuccess()/onError() for Terminal Handlers
 
 ```cpp
-// ✅ GOOD
-if (response.status != 200) {
-    promise->rejectWith(ao::ErrorCode::InvalidResponse);
-} else if (timeout_occurred) {
-    promise->rejectWith(ao::ErrorCode::Timeout);
-}
-
-// ❌ BAD
-promise->rejectWith(ao::ErrorCode::Unknown);  // Not helpful!
-```
-
-### 3. Add Timeouts to Network Operations
-
-```cpp
-// ✅ GOOD
-fetchFromServer()
-    .timeout(std::chrono::seconds(30))
-    .then([](Data d) { processData(d); })
-    .onError([](ao::ErrorCode err) {
-        if (err == ao::ErrorCode::Timeout) {
-            spdlog::error("Server timeout");
-        }
-    });
-
-// ❌ RISKY - No timeout, might hang forever
-fetchFromServer()
-    .then([](Data d) { processData(d); });
-```
-
-### 4. Use finally() for Resource Cleanup
-
-```cpp
-// ✅ GOOD
-auto file = openFile("data.txt");
-readFileAsync(file)
-    .finally([file]() {
-        closeFile(file);  // Always closes
-    })
-    .then([](Data d) { processData(d); })
-    .onError([](ao::ErrorCode err) {
-        // File already closed
-    });
-
-// ❌ RISKY - File might not be closed on error
-readFileAsync(file)
-    .then([file](Data d) {
-        closeFile(file);  // Only closes on success!
-        processData(d);
-    });
-```
-
-### 5. Move Large Objects
-
-```cpp
-// ✅ GOOD - Efficient
-promise->resolveWith(std::move(large_data));
-
-.then([](Data d) {  // d moved in
-    return processData(std::move(d));  // Move again
-})
-
-// ❌ BAD - Unnecessary copies
-promise->resolveWith(large_data);  // Copy
-.then([](Data d) {  // Another copy
-    return processData(d);  // Yet another copy
-})
-```
-
-### 6. Use tap() for Side Effects
-
-```cpp
-// ✅ GOOD
+// ✅ Efficient - no unused AsyncOp
 fetchData()
-    .tap([](const Data& d) {
-        spdlog::info("Got data: {}", d.size);  // Log
-        recordMetric("fetch_success");          // Metric
-    })
-    .then([](Data d) { return processData(d); });
+    .then(process)
+    .onSuccess([](Result r) { display(r); });
 
-// ❌ WASTEFUL - Extra then() in chain
+// ❌ Less efficient - creates unused AsyncOp
+fetchData()
+    .then(process)
+    .then([](Result r) { display(r); });  // Returns unused AsyncOp
+```
+
+### 3. Chain Operations, Don't Set Multiple Handlers
+
+```cpp
+// ✅ CORRECT - Chain operations
+fetchData()
+    .then(step1)
+    .then(step2)
+    .then(step3);
+
+// ❌ WRONG - Multiple handlers on same op (only first runs)
+auto op = fetchData();
+op.then(step1);  // Runs
+op.then(step2);  // NEVER RUNS - triggers assertion
+```
+
+### 4. Use tap() for Side Effects
+
+```cpp
+// ✅ CORRECT - Use tap() for logging
+fetchData()
+    .tap([](Data d) { spdlog::debug("Got: {}", d); })
+    .then([](Data d) { return process(d); });
+
+// ❌ WRONG - Don't log in then()
 fetchData()
     .then([](Data d) {
-        spdlog::info("Got data: {}", d.size);
-        return d;  // Have to return it
+        spdlog::debug("Got: {}", d);
+        return d;  // Unnecessary return
     })
-    .then([](Data d) { return processData(d); });
+    .then([](Data d) { return process(d); });
 ```
 
-### 7. Choose Right Collection Operation
+### 5. Use recover() for Error Handling, otherwise() for Branching
 
 ```cpp
-// Independent operations? → Parallel
-ao::mapParallel(users, fetchUserData);     // ✅ Fast
+// ✅ CORRECT - Use recover() for fallback
+operation()
+    .recover([](ErrorCode e) { return getDefault(); })
+    .then([](Data d) { process(d); });
 
-// Dependent or rate-limited? → Sequential  
-ao::map(users, fetchUserData);             // ✅ Controlled
-
-// Want to retry failures? → Settled
-ao::forEachSettled(items, processItem)     // ✅ Resilient
-    .then([](auto failed) {
-        if (!failed.empty()) retryItems(failed);
-    });
+// ✅ CORRECT - Use otherwise() for branching
+auto op = fetchData();
+op.then(processSuccess);
+op.otherwise(processError);  // Alternative path
 ```
 
-### 8. Use Semantic Method Names
+### 6. Add Timeouts to Network Operations
 
 ```cpp
-// For error recovery
-parseConfig()
-    .recover([](ao::ErrorCode) {
-        return getDefaultConfig();  // ✅ "recover" = fixing error
+// ✅ CORRECT
+fetchFromServer()
+    .timeout(5000ms)
+    .recover([](ErrorCode e) {
+        if (e == ErrorCode::Timeout) {
+            return getCached();
+        }
+        throw e;
     });
-
-// For alternative paths
-fetchFromCache()
-    .otherwise([](ao::ErrorCode) {
-        return fetchFromDB();       // ✅ "otherwise" = alternative
-    });
-
-// Both are identical, use whichever reads better!
 ```
+
+### 7. Use finally() for Cleanup
+
+```cpp
+// ✅ CORRECT - Guaranteed cleanup
+openResource()
+    .then([](Resource r) { return useResource(r); })
+    .finally([resource]() {
+        resource.close();  // Always runs
+    });
+```
+
+### 8. Prefer filterSuccess/filterError() Over filter()
+
+```cpp
+// ✅ CLEAR - Only validating success
+op.filterSuccess([](Data d) -> Data {
+    if (!d.isValid()) throw ErrorCode::InvalidResponse;
+    return d;
+});
+
+// ❌ LESS CLEAR - Using full filter() for one path
+op.filter(
+    [](Data d) -> Data {
+        if (!d.isValid()) throw ErrorCode::InvalidResponse;
+        return d;
+    },
+    nullptr  // Confusing
+);
+```
+
+### 9. Use mapParallel() for Independent Operations
+
+```cpp
+// ✅ CORRECT - Independent ops can run in parallel
+ao::mapParallel(ids, [](int id) {
+    return fetchUser(id);
+});
+
+// ❌ SUBOPTIMAL - Sequential when could be parallel
+ao::map(ids, [](int id) {
+    return fetchUser(id);
+});
+```
+
+### 10. Handle Errors Explicitly
+
+```cpp
+// ✅ CORRECT - Always handle errors
+operation()
+    .then(process)
+    .onError([](ErrorCode e) {
+        spdlog::error("Failed: {}", e);
+    });
+
+// ❌ WRONG - Unhandled errors silently disappear
+operation()
+    .then(process);
+// No error handler - errors are lost!
+```
+
+---
+
+## Performance Considerations
+
+### Memory Usage
+
+**Per AsyncOp instance:**
+- State object: ~120-200 bytes (depending on `T`)
+- Shared via `shared_ptr`: Multiple AsyncOps can share same state
+
+**Optimization tips:**
+- Use `onSuccess()`/`onError()` for terminal handlers (saves one allocation)
+- Use `std::move()` for large values
+- Avoid capturing large objects in lambdas
+
+### Callback Overhead
+
+**Single callback per operation:**
+- Unlike JavaScript Promises (multiple `.then()`), AsyncOp supports ONE handler per type
+- Prevents handler explosion in memory-constrained environments
+- Use `.tap()` for multiple side effects
+
+### Collection Operations
+
+**Performance characteristics:**
+- `all()`: O(n) operations, parallel execution
+- `any()`: Best case O(1) (first success), worst case O(n)
+- `race()`: O(1) (first to finish)
+- `map()`: O(n) sequential, one-at-a-time
+- `mapParallel()`: O(n) parallel, all-at-once
+
+**Choose wisely:**
+```cpp
+// Fast - parallel execution
+ao::mapParallel(urls, fetchUrl);
+
+// Slow - sequential execution (useful for rate limiting)
+ao::map(urls, fetchUrl);
+```
+
+### Async Operation Overhead
+
+**Timer creation cost:**
+- GLib: `g_timeout_add_full()` ~1-2 μs
+- Qt: `new QTimer()` ~2-5 μs
+
+**For high-frequency operations (>1000/sec):**
+- Consider batching
+- Use object pools for reusable operations
+- Profile before optimizing
+
+---
+
+## Integration Guide
+
+### Project Setup
+
+**CMakeLists.txt:**
+```cmake
+# Required
+find_package(PkgConfig REQUIRED)
+find_package(spdlog REQUIRED)
+
+# Backend selection
+# Option 1: GLib (default)
+pkg_check_modules(GLIB REQUIRED glib-2.0)
+target_link_libraries(your_app ${GLIB_LIBRARIES})
+target_include_directories(your_app PUBLIC ${GLIB_INCLUDE_DIRS})
+
+# Option 2: Qt
+# add_definitions(-DASYNC_USE_QT)
+# find_package(Qt5 COMPONENTS Core REQUIRED)
+# target_link_libraries(your_app Qt5::Core)
+
+# AsyncOp
+target_include_directories(your_app PUBLIC ${CMAKE_SOURCE_DIR}/include)
+```
+
+### Source Files
+
+Required files:
+- `async_op.hpp` - Main AsyncOp implementation
+- `async_op_void.hpp` - Specialization for `AsyncOp<void>`
+- `ao_event_loop.hpp` - Event loop abstraction
+
+Optional:
+- `msg_registry.hpp` - Message-based async operations (for networking)
+
+### Logging Configuration
+
+AsyncOp uses spdlog extensively:
+
+```cpp
+#include <spdlog/spdlog.h>
+
+int main() {
+    // Set log level (default: info)
+    spdlog::set_level(spdlog::level::debug);
+    
+    // Or disable AsyncOp logging
+    spdlog::set_level(spdlog::level::warn);
+    
+    // Your code...
+}
+```
+
+### Backend Selection
+
+**GLib (default):**
+```cpp
+#include "async_op.hpp"  // Uses GLib by default
+
+int main() {
+    GMainLoop* loop = g_main_loop_new(NULL, FALSE);
+    
+    // Your async operations
+    
+    g_main_loop_run(loop);
+    g_main_loop_unref(loop);
+}
+```
+
+**Qt:**
+```cpp
+// In CMakeLists.txt or compiler flags:
+// -DASYNC_USE_QT
+
+#include <QApplication>
+#include "async_op.hpp"  // Uses Qt backend
+
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+    
+    // Your async operations
+    
+    return app.exec();
+}
+```
+
+### Custom Event Loop Backend
+
+To add a new backend (e.g., libuv):
+
+1. **Edit `ao_event_loop.hpp`:**
+
+```cpp
+#ifdef ASYNC_USE_LIBUV
+# include <uv.h>
+using timer_type = uv_timer_t*;
+#define FORMAT_TIMER(timer) fmt::ptr(timer)
+#endif
+```
+
+2. **Implement required functions:**
+```cpp
+timer_type add_timeout(std::chrono::milliseconds timeout, std::function<bool()> cb);
+timer_type add_idle(std::function<bool()> cb);
+void remove_timeout(timer_type id);
+bool is_main_thread();
+void invoke_main(std::function<void()> cb);
+```
+
+3. **Update format macro and utility functions.**
+
+---
+
+## Additional Utilities
+
+### MessageRegistry (msg_registry.hpp)
+
+For network/IPC operations that need request-response correlation:
+
+```cpp
+#include "msg_registry.hpp"
+
+ao::MessageRegistry<ResponseData> registry;
+
+// Send request
+ao::AsyncOp<ResponseData> sendRequest(const Request& req) {
+    ao::AsyncOp<ResponseData> result;
+    int64_t msg_id = registry.registerMessage(
+        result.promise(), 
+        std::chrono::seconds(5)  // Timeout
+    );
+    
+    sendToNetwork(msg_id, req);
+    return result;
+}
+
+// Handle response
+void onNetworkMessage(int64_t id, const ResponseData& data) {
+    registry.handleResponse(id, data);
+}
+```
+
+**Features:**
+- Timestamp-based unique IDs (no collisions across restarts)
+- Built-in timeout support
+- Thread-safe registration/lookup
+- O(1) operations
 
 ---
 
 ## Troubleshooting
 
-### Problem: Callback Never Fires
+### Common Issues
 
-**Symptoms:**
-- `.then()` or `.onError()` never executes
-- Operation seems to hang
+**1. Callback Never Executes**
 
-**Common Causes:**
-
-1. **Event loop not running**
+Problem:
 ```cpp
-// ✅ Ensure event loop is running
-g_main_loop_run(loop);  // GLib
-app.exec();             // Qt
+auto op = fetchData();
+op.then(handler1);
+op.then(handler2);  // Never runs!
 ```
 
-2. **AsyncOp destroyed too early**
+Solution: Chain operations, don't set multiple handlers
 ```cpp
-// ❌ BAD - op destroyed before callback fires
-void myFunc() {
-    auto op = fetchData();
-    op.then([](Data d) { /* never called */ });
-}  // op destroyed here!
-
-// ✅ GOOD - Keep op alive
-class MyClass {
-    ao::AsyncOp<Data> m_operation;
-    
-    void myFunc() {
-        m_operation = fetchData();
-        m_operation.then([](Data d) { /* will be called */ });
-    }
-};
+fetchData()
+    .then(handler1)
+    .then(handler2);
 ```
 
-3. **Forgot to settle the promise**
-```cpp
-// ❌ BAD - Promise never resolved
-ao::AsyncOp<int> fetchData() {
-    ao::AsyncOp<int> future;
-    ao::Promise<int> promise = future.promise();
-    
-    ao::add_timeout(100ms, [promise]() {
-        // Forgot to resolve!
-        return false;
-    });
-    
-    return future;  // Will never settle
-}
+**2. Memory Leak / Callback Not Cleaned Up**
 
-// ✅ GOOD - Always resolve or reject
-ao::add_timeout(100ms, [promise]() {
-    promise->resolveWith(42);  // or rejectWith()
+Problem: Capturing AsyncOp instead of Promise
+```cpp
+ao::AsyncOp<int> op;
+add_timeout(100ms, [op]() {  // ❌ Captured future
     return false;
 });
 ```
 
-### Problem: Segmentation Fault
-
-**Common Causes:**
-
-1. **Capturing wrong thing in callback**
+Solution: Always capture promise
 ```cpp
-// ❌ BAD - Capturing future instead of promise
 ao::AsyncOp<int> op;
-ao::add_timeout(100ms, [op]() {  // ❌ Wrong!
-    // op has no resolveWith() method!
-});
-
-// ✅ GOOD - Capture promise
-ao::add_timeout(100ms, [promise = op.promise()]() {
+add_timeout(100ms, [promise = op.promise()]() {
     promise->resolveWith(42);
+    return false;
 });
 ```
 
-2. **Accessing state from worker thread**
+**3. Operation Never Completes**
+
+Problem: Promise never settled
 ```cpp
-// ❌ BAD - Direct access from worker
-std::thread([promise]() {
-    auto result = compute();
-    promise->resolveWith(result);  // ❌ Crash!
-}).detach();
-
-// ✅ GOOD - Marshal to main thread
-std::thread([promise]() {
-    auto result = compute();
-    ao::invoke_main([promise, result]() {
-        promise->resolveWith(result);  // ✅ Safe
-    });
-}).detach();
-```
-
-3. **Dangling references**
-```cpp
-// ❌ BAD - Reference to local variable
-void processData() {
-    Data local_data = loadData();
-    
-    ao::delay(1s).then([&local_data]() {  // ❌ Dangling reference!
-        useData(local_data);
-    });
-}  // local_data destroyed here
-
-// ✅ GOOD - Capture by value or shared_ptr
-void processData() {
-    auto data = std::make_shared<Data>(loadData());
-    
-    ao::delay(1s).then([data]() {  // ✅ Safe
-        useData(*data);
-    });
+ao::AsyncOp<int> fetchData() {
+    ao::AsyncOp<int> op;
+    // Forgot to settle the promise!
+    return op;
 }
 ```
 
-### Problem: Callback Overwrite Prevention
-
-**Symptom:**
-- Only the first `.then()` executes (subsequent ones are prevented)
-- Error in logs: "cannot overwrite then() callback", "cannot overwrite success handler", or "cannot overwrite error handler"
-
-**Cause:**
-AsyncOp now includes callback overwrite protection to prevent accidental overwrites. A callback can only be overwritten if:
-- No previous callback exists, OR
-- The previous callback was a propagation callback (set by methods like `recover`, `finally`, etc.)
-
+Solution: Always settle the promise
 ```cpp
-// ❌ WRONG - Second then() is prevented from overwriting first
-auto op = fetchData();
-op.then([](Data d) { processA(d); });  // Prevents overwrites!
-op.then([](Data d) { processB(d); });  // This will be prevented and logged
-
-// ✅ CORRECT - Use tap() for side effects
-auto op = fetchData();
-op.then([](Data d) { processMain(d); })  // Main processing
- .tap([](Data d) { logData(d); });      // Side effect without preventing overwrites
-```
-
-**Solutions:**
-
-1. **Chain instead of branching**
-```cpp
-// ✅ Linear chain
-fetchData()
-    .tap([](Data d) { processA(d); })   // Side effect
-    .then([](Data d) { return processB(d); });  // Main processing
-```
-
-2. **Use separate branches for success/error**
-```cpp
-// ✅ One success branch, one error branch
-auto op = fetchData();
-op.then([](Data d) { processSuccess(d); });
-op.otherwise([](ao::ErrorCode e) { processError(e); });
-```
-
-### Problem: Race Condition
-
-**Symptom:**
-- Crashes in multi-threaded code
-- Inconsistent behavior
-
-**Cause:**
-Accessing AsyncOp state from wrong thread.
-
-```cpp
-// ❌ BAD - Worker thread accessing state
-std::thread([promise]() {
-    auto result = compute();
-    
-    if (some_condition) {
-        promise->resolveWith(result);  // ❌ Race!
-    } else {
-        promise->rejectWith(ao::ErrorCode::InvalidResponse);  // ❌ Race!
-    }
-}).detach();
-
-// ✅ GOOD - Always marshal to main thread
-std::thread([promise]() {
-    auto result = compute();
-    
-    ao::add_idle([promise, result]() {
-        if (some_condition) {
-            promise->resolveWith(result);  // ✅ Safe
-        } else {
-            promise->rejectWith(ao::ErrorCode::InvalidResponse);  // ✅ Safe
-        }
+ao::AsyncOp<int> fetchData() {
+    ao::AsyncOp<int> op;
+    add_timeout(100ms, [promise = op.promise()]() {
+        promise->resolveWith(42);  // ✅ Settled
         return false;
     });
-}).detach();
+    return op;
+}
 ```
 
-### Problem: Memory Leak
+**4. Timeout Doesn't Work as Expected**
 
-**Cause:**
-Circular references or improper resource management.
-
+Problem: Timer starts immediately when `.timeout()` is called
 ```cpp
-// ❌ POTENTIAL LEAK - Timer not cancelled
-auto timer = ao::add_timeout(1s, []() {
-    return true;  // Repeating timer
-});
-// Timer runs forever if not cancelled!
-
-// ✅ GOOD - Use single-shot or cancel
-auto timer = ao::add_timeout(1s, [promise]() {
-    promise->resolveWith(data);
-    return false;  // Single-shot
-});
-
-// Or cancel explicitly
-ao::remove_timeout(timer);
+// Timeout covers BOTH operations
+op1().then(op2).timeout(1000ms);
 ```
 
----
-
-## Performance Tips
-
-### 1. Parallel vs Sequential
-
+Solution: Apply timeout to specific operation
 ```cpp
-// ✅ FAST - Independent operations in parallel
-ao::mapParallel(users, [](User u) {
-    return fetchUserData(u);  // All fetch simultaneously
-});
-
-// ⏱️ SLOW - Sequential (but necessary if rate-limited)
-ao::map(users, [](User u) {
-    return fetchUserData(u);  // One at a time
-});
+// Timeout covers only op2
+op1().then([]() { return op2().timeout(1000ms); });
 ```
 
-**Speedup example**: Fetching 100 users
-- Sequential: 100 requests × 100ms = 10 seconds
-- Parallel: 100ms (all at once)
+**5. Error Silently Disappears**
 
-### 2. Use Timeouts
-
+Problem: No error handler
 ```cpp
-// ✅ GOOD - Prevents hung operations
-fetchData()
-    .timeout(5s)
-    .then([](Data d) { processData(d); });
-
-// ❌ RISKY - Might wait forever
-fetchData()
-    .then([](Data d) { processData(d); });
+operation()
+    .then(process);  // ❌ No error handler
 ```
 
-### 3. Move Large Objects
-
+Solution: Always add `.onError()`
 ```cpp
-struct LargeData {
-    std::vector<uint8_t> buffer;  // 10MB
+operation()
+    .then(process)
+    .onError([](ErrorCode e) { 
+        spdlog::error("Error: {}", e); 
+    });
+```
+
+### Debug Tips
+
+**Enable verbose logging:**
+```cpp
+spdlog::set_level(spdlog::level::trace);
+```
+
+**Check operation state:**
+```cpp
+auto op = fetchData();
+spdlog::debug("Op[{}] pending: {}", op.id(), op.isPending());
+
+op.then([](Data d) {
     // ...
-};
-
-// ✅ EFFICIENT - No copies
-promise->resolveWith(std::move(large_data));
-
-.then([](LargeData d) {  // Move construction
-    return processData(std::move(d));  // Move again
-})
-
-// ❌ WASTEFUL - 3 copies of 10MB!
-promise->resolveWith(large_data);  // Copy 1
-
-.then([](LargeData d) {  // Copy 2
-    return processData(d);  // Copy 3
-})
+});
 ```
 
-### 4. Use tap() Not Extra then()
-
+**Log in callbacks:**
 ```cpp
-// ✅ EFFICIENT - One allocation
 fetchData()
-    .tap([](const Data& d) {
-        spdlog::info("Size: {}", d.size);
+    .tap([](Data d) { 
+        spdlog::debug("Got data: {}", d.size()); 
     })
-    .then([](Data d) { return processData(d); });
-
-// ❌ WASTEFUL - Two allocations
-fetchData()
-    .then([](Data d) {
-        spdlog::info("Size: {}", d.size);
-        return d;
-    })
-    .then([](Data d) { return processData(d); });
+    .tapError([](ErrorCode e) { 
+        spdlog::error("Error occurred: {}", e); 
+    });
 ```
-
-### 5. Retry with Backoff
-
-```cpp
-// ✅ GOOD - Exponential backoff
-ao::retryWithBackoff(
-    []() { return unreliableOperation(); },
-    3,     // Max 3 attempts
-    1s     // 1s, 2s, 4s delays
-)
-
-// ❌ BAD - Hammering server with immediate retries
-for (int i = 0; i < 3; ++i) {
-    unreliableOperation();  // No delay!
-}
-```
-
-### 6. Batch with Settled Operations
-
-```cpp
-// ✅ RESILIENT - Process all, handle failures
-ao::forEachSettled(items, [](Item item) {
-    return processItem(item);
-})
-.then([](std::vector<Item> failed) {
-    if (!failed.empty()) {
-        spdlog::warn("{} items failed, requeueing", failed.size());
-        requeue(failed);
-    }
-});
-
-// ❌ FRAGILE - Stops on first error
-ao::forEach(items, [](Item item) {
-    return processItem(item);  // One error = whole batch fails
-});
-```
-
-### 7. Choose Right Race Semantic
-
-```cpp
-// ✅ For timeout implementation
-ao::race({
-    fetchData(),
-    ao::delay(5s).then([]() { throw ao::ErrorCode::Timeout; })
-});
-
-// ✅ For fallback sources
-ao::any({
-    fetchFromPrimary(),
-    fetchFromSecondary(),
-    fetchFromCache()
-});  // First success wins, fail only if all fail
-```
-
-### 8. Worker Threads for Heavy Computation
-
-```cpp
-// ✅ GOOD - Keep main thread responsive
-ao::AsyncOp<Result> computeAsync() {
-    ao::AsyncOp<Result> future;
-    ao::Promise<Result> promise = future.promise();
-    
-    std::thread([promise]() {
-        auto result = heavyComputation();  // 5 seconds
-        ao::invoke_main([promise, result]() {
-            promise->resolveWith(result);
-        });
-    }).detach();
-    
-    return future;
-}
-
-// ❌ BAD - Blocks main thread
-ao::AsyncOp<Result> computeAsync() {
-    ao::AsyncOp<Result> future;
-    auto result = heavyComputation();  // UI freezes for 5 seconds!
-    return ao::AsyncOp<Result>::resolved(result);
-}
-```
-
-### Performance Comparison Table
-
-| Operation | Sequential | Parallel | Speedup |
-|-----------|-----------|----------|---------|
-| 10 independent 100ms tasks | 1.0s | 0.1s | **10×** |
-| 100 independent 100ms tasks | 10.0s | 0.1s | **100×** |
-| 10 dependent tasks | 1.0s | N/A | — |
-
-**Rule of thumb:** Use parallel operations unless:
-- Tasks are dependent on each other
-- Rate limiting required
-- Server can't handle parallel load
 
 ---
 
-## What's New in v2.4
+## API Summary
 
-### New Error Handling & Filtering APIs
+### Core Methods
 
-**✨ Dual-Path Filtering with `filter()`**
+| Method | Purpose | Returns New AsyncOp? | Terminal? |
+|--------|---------|---------------------|-----------|
+| `.then(f)` | Transform success | ✅ Yes | ❌ No |
+| `.recover(f)` | Convert error to success | ✅ Yes | ❌ No |
+| `.otherwise(f)` | Branching (alias for recover) | ✅ Yes | ❌ No |
+| `.next(s, e)` | Handle both paths | ✅ Yes | ❌ No |
+| `.onSuccess(f)` | Terminal success handler | ❌ No | ✅ Yes |
+| `.onError(f)` | Terminal error handler | ❌ No | ✅ Yes |
+| `.filter(s, e)` | Dual-path filtering | ✅ Yes | ❌ No |
+| `.filterSuccess(f)` | Success-only filtering | ✅ Yes | ❌ No |
+| `.filterError(f)` | Error-only filtering | ✅ Yes | ❌ No |
+| `.tap(f)` | Success side effect | ✅ Yes | ❌ No |
+| `.tapError(f)` | Error side effect | ✅ Yes | ❌ No |
+| `.finally(f)` | Cleanup (both paths) | ✅ Yes | ❌ No |
+| `.timeout(d)` | Add timeout | ✅ Yes | ❌ No |
+| `.cancel(e)` | Cancel operation | ❌ No | ❌ No |
 
-- New `filter()` method for unified success/error path handling
-- Success filter: return value to pass through, throw `ErrorCode` to reject
-- Error filter: return value to recover, throw `ErrorCode` to propagate
-- Added `filterSuccess()` - Filter success path only, errors propagate unchanged
-- Added `filterError()` - Filter error path only, success propagates unchanged
+### Collection Functions
 
-**✨ Error Side Effects with `tapError()`**
+| Function | Purpose | Completion |
+|----------|---------|------------|
+| `all()` | Wait for all success | First error |
+| `any()` | Race for first success | All fail |
+| `race()` | First to settle | First result |
+| `allSettled()` | Wait for all (success + error) | All complete |
+| `map()` | Sequential transformation | First error |
+| `mapParallel()` | Parallel transformation | First error |
+| `mapSettled()` | Sequential with all results | All complete |
+| `forEach()` | Sequential execution | First error |
+| `forEachSettled()` | Sequential with failed items | All complete |
 
-- Added `tapError()` - Execute side effects on error without modifying the error
-- Useful for error logging, metrics collection, and debugging
-- Equivalent to `filterError([](ErrorCode err) { side_effect_fn(err); throw err; })`
+### Utility Functions
 
-**✨ Operation Cancellation**
-
-- Added `cancel()` - Reject pending operations with configurable error code
-- Returns `*this` for chaining, no-op if already settled
-
-### Bug Fixes
-
-- Fixed `next()` nullptr handling with dependent `static_assert` for proper `if constexpr` compilation
-
-### API Deprecations
-
-- `orElse()` - Use `otherwise()` with explicit fallback logic instead
-- `recoverFrom()` - Use `filterError()` for more flexible error handling
-
----
-
-## What's New in v2.3
-
-### Major Changes
-
-**✨ New onSuccess() Function**
-- Added `onSuccess()` terminal handler for success cases (similar to `onError()` but for success)
-- Provides symmetry for terminal success handling without continuing the chain
-- Follows same callback overwrite protection as other handlers
-- Includes proper chaining constraints documentation
-
-**🔒 Enhanced Callback Protection**
-- Improved callback overwrite protection mechanism to prevent accidental overwrites
-- More informative error messages when callback overwrites are prevented
-- Consistent overwrite protection across all handler types (then, onSuccess, onError, etc.)
-
-**📝 Documentation Improvements**
-- Comprehensive documentation for the new `onSuccess()` function
-- Added chaining rules and constraints section
-- Updated examples and API references to include the new functionality
-- Improved project structure and build configuration documentation
-
-**⚙️ Build System Updates**
-- Enhanced CMake configuration to better support both Qt5 and GLib backends
-- Better handling of optional Qt5 dependencies
+| Function | Purpose |
+|----------|---------|
+| `delay(duration)` | Wait for duration |
+| `defer(f)` | Execute sync function async |
+| `retry(op, n)` | Retry immediately |
+| `retryWithBackoff(op, n, d)` | Retry with exponential backoff |
 
 ---
 
-## Project Structure and Build Configuration
+## License
 
-
-Understanding the project structure and build configuration will help you navigate and extend the AsyncOp library.
-
-### 1. Repository Structure
-
-```
-asyncop/
-├── README.md                    # Overview, quick start, badges
-├── LICENSE                      # MIT license
-├── CMakeLists.txt              # Build configuration
-├── .gitignore                  # Ignore build/, *.o, etc.
-├── .clang-format               # Code formatting rules
-├── CHANGELOG.md                # Version history
-├── CONTRIBUTING.md             # Contribution guidelines
-│
-├── include/
-│   ├── async_op.hpp            # Main header for AsyncOp<T>
-│   └── async_op_void.hpp       # Specialization for AsyncOp<void>
-│
-├── docs/
-│   └── async_op_doc.md         # Comprehensive documentation
-│
-├── tests/
-│   └── ...                     # Unit tests
-│
-└── examples/
-    └── CMakeLists.txt          # Example build configuration
-```
-
-### 2. Build Configuration
-
-The library uses CMake for build configuration with the following features:
-
-#### CMakeLists.txt
-```cmake
-cmake_minimum_required(VERSION 3.10)
-project(AsyncOp VERSION 2.4.1 LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# Options
-option(BUILD_TESTS "Build tests" ON)
-
-# Library (header-only)
-add_library(asyncop INTERFACE)
-target_include_directories(asyncop INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-)
-
-# Find dependencies
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GLIB REQUIRED glib-2.0)
-find_package(spdlog REQUIRED)
-
-# Try to find Qt5 (optional)
-find_package(Qt5 COMPONENTS Core Widgets Network QUIET)
-if(Qt5_FOUND)
-    set(HAVE_QT5 TRUE)
-    message(STATUS "Qt5 found - building Qt support")
-else()
-    set(HAVE_QT5 FALSE)
-    message(WARNING "Qt5 not found - building without Qt support")
-endif()
-
-# Link dependencies
-if(HAVE_QT5)
-    target_link_libraries(asyncop INTERFACE ${GLIB_LIBRARIES} Qt5::Core Qt5::Widgets Qt5::Network spdlog::spdlog)
-else()
-    target_link_libraries(asyncop INTERFACE ${GLIB_LIBRARIES} spdlog::spdlog)
-endif()
-target_include_directories(asyncop SYSTEM INTERFACE ${GLIB_INCLUDE_DIRS})
-target_compile_options(asyncop INTERFACE ${GLIB_CFLAGS_OTHER})
-
-# Options
-option(BUILD_EXAMPLES "Build examples" ON)
-
-# Add tests if enabled
-if(BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(tests)
-endif()
-
-# Add examples if enabled
-if(BUILD_EXAMPLES)
-    add_subdirectory(examples)
-endif()
-```
-
-This configuration supports both GLib and Qt backends, with spdlog for logging and pkg-config for dependency management.
+MIT License - See LICENSE file for details
 
 ---
 
-## Summary
+## Support & Contributing
 
-**AsyncOp v2.3** provides production-ready Promise/Future semantics for embedded Linux:
+- **Issues:** Report bugs or request features on GitHub
+- **Documentation:** This guide covers v2.4.1
+- **Examples:** See `examples/` directory for more patterns
 
-✅ **Clear Promise/Future model** - `AsyncOp<T>` = Future, `Promise<T>` = Promise
-✅ **Powerful chaining** - `.then()`, `.recover()`, `.next()`, `.otherwise()`
-✅ **Error handling** - Multiple patterns for resilient async workflows
-✅ **Collection operations** - Sequential and parallel processing
-✅ **Thread-safe** - Worker thread integration via `invoke_main()`
-✅ **Type-safe** - Compile-time checking, no runtime surprises
-✅ **Embedded-friendly** - Minimal overhead, designed for 64MB+ systems
-✅ **Dual backend** - GLib 2.0+ or Qt 5.12+
+**Version:** 2.4.1  
+**Last Updated:** 2026-02-28  
+**Author:** pansz

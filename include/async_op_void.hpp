@@ -157,12 +157,13 @@ public:
     /**
      * @brief Chain operation to execute on success
      *
-     * @tparam F Function type (T -> U or T -> AsyncOp<U>)
+     * @tparam F Function type (() -> U or () -> AsyncOp<U>)
      * @param f Function to execute on success
      * @return New AsyncOp for chained operation
      *
-     * @warning Calling then() multiple times for the same object is an error.
-     * Use chained call like op.then(f).then(g); instead of op.then(f); op.then(g);
+     * @warning Calling then() multiple times on the same AsyncOp instance will trigger an assertion.
+     *          For sequential operations, chain them: op.then(f).then(g)
+     *          For branching, store the original: auto op = fetch(); op.then(f); op.recover(g);
      */
     template<typename F>
     auto then(F&& f) -> AsyncOp<unwrap_async_op_t<typename std::invoke_result<F>::type>> {
@@ -243,9 +244,26 @@ public:
     }
 
     /**
-     * @brief Set success handler
-     * @warning Calling onSuccess() multiple times will be an error
-     * @warning If not the last handler in chain, the next handler must be onError()
+     * @brief Set terminal success handler without creating a new AsyncOp
+     *
+     * Use onSuccess() as the final handler in a chain to avoid allocating an unused AsyncOp.
+     * When then() is used as the last action, it creates a new AsyncOp that never gets used,
+     * wasting a memory allocation. This is not incorrect, just inefficient.
+     *
+     * @warning Calling onSuccess() multiple times on the same AsyncOp instance will trigger an assertion
+     * @warning After onSuccess(), only onError() can be called (chain is effectively terminated)
+     *
+     * @code
+     * // Efficient: no unused AsyncOp allocation
+     * fetchData().then(process).onSuccess([]() {
+     *     spdlog::info("Done");
+     * });
+     *
+     * // Less efficient: then() creates unused AsyncOp
+     * fetchData().then(process).then([]() {
+     *     spdlog::info("Done");
+     * }); // Returns AsyncOp that's never used
+     * @endcode
      */
     AsyncOp<void>& onSuccess(std::function<void()> handler) {
         spdlog::trace("AsyncOp[{}] setting success handler", id());
@@ -269,10 +287,28 @@ public:
     }
 
     /**
-     * @brief Set error handler
-     * @warning Calling onError() multiple times will be an error.
-     * @warning If chained after onSuccess(), it must be the end of chain.
-     * @warning If it is not end of chain, the next handler must be then().
+     * @brief Set terminal error handler without creating a new AsyncOp
+     *
+     * This method can be used in two ways:
+     * 1. As end-of-chain: .onSuccess().onError() or .then().onError()
+     * 2. Before then(): .onError().then() to set error handler before the next then() call
+     *
+     * @warning Calling onError() multiple times on the same AsyncOp instance will trigger an assertion
+     * @warning After onSuccess().onError(), the chain is terminated (no further calls allowed)
+     * @warning When used mid-chain, the next call must be then() to propagate success values
+     *
+     * @code
+     * // Pattern 1: End of chain
+     * fetchData()
+     *     .then(process)
+     *     .onSuccess([]() { display(); })
+     *     .onError([](ErrorCode e) { logError(e); });
+     *
+     * // Pattern 2: Set error handler before then()
+     * fetchData()
+     *     .onError([](ErrorCode e) { logError(e); })
+     *     .then([]() { return processData(); }); // then() still needed for success path
+     * @endcode
      */
     AsyncOp<void>& onError(std::function<void(ErrorCode)> handler) {
         spdlog::trace("AsyncOp[{}] setting error handler", id());
@@ -560,13 +596,25 @@ public:
     
     /**
      * @brief Add timeout to operation
-     * 
+     *
      * Creates new AsyncOp that:
-     * - Resolves with same value if operation completes within duration
+     * - Resolves if operation completes within duration
      * - Rejects with ErrorCode::Timeout if duration elapses first
-     * 
+     *
      * @param duration Timeout duration
      * @return New AsyncOp with timeout applied
+     *
+     * **IMPORTANT: Timer starts immediately when timeout() is called**, not when
+     * the previous operation completes. The timeout covers all operations in the
+     * chain from the point where timeout() is called.
+     *
+     * @code
+     * // Timeout applies to both op1 AND op2 combined (timer starts immediately)
+     * op1().then([](){ return op2(); }).timeout(3000ms);
+     *
+     * // Timeout applies only to op2 (timer starts when op2's chain is set up)
+     * op1().then([](){ return op2().timeout(3000ms); });
+     * @endcode
      */
     AsyncOp<void> timeout(std::chrono::milliseconds duration) {
         spdlog::debug("AsyncOp[{}] setting timeout of {}ms", id(), duration.count());
@@ -629,12 +677,34 @@ public:
 
     /**
      * @brief Execute side effect on error without modifying the error
-     * 
-     * Useful for logging errors, metrics, debugging. Error passes through unchanged.
-     * The side effect receives the ErrorCode, executes, then the error is rethrown.
-     * Exceptions in side effect are caught and logged but don't affect the chain.
-     * 
-     * Equivalent to: filterError([](ErrorCode err) { side_effect_fn(err); throw err; })
+     *
+     * Error-path counterpart to tap(). Allows inspection or logging when errors occur,
+     * while passing the error through unchanged to the next handler. Useful for debugging,
+     * metrics collection, or error notification without affecting the error chain.
+     *
+     * @tparam F Function type: (ErrorCode -> void)
+     * @param side_effect_fn Function to execute when error occurs
+     * @return AsyncOp<void> with same error propagated unchanged
+     *
+     * **Behavior:**
+     * - Success values pass through without calling side_effect_fn
+     * - On error: side_effect_fn(err) executes, then error is thrown to propagate
+     * - Exceptions in side_effect_fn are caught and logged (don't affect the chain)
+     *
+     * @code
+     * fetchUser(id)
+     *     .then([](User u) { return processUser(u); })
+     *     .tapError([](ErrorCode err) {
+     *         spdlog::error("User processing failed: {}", err);
+     *         metrics.increment("user_errors");
+     *     })
+     *     .recover([](ErrorCode err) {
+     *         return User::defaultUser();
+     *     });
+     * @endcode
+     *
+     * @note Equivalent to: filterError([f](ErrorCode err) { f(err); throw err; })
+     * @note For error recovery (changing error to success), use recover() or filterError()
      */
     template<typename F>
     AsyncOp<void> tapError(F&& side_effect_fn) {
@@ -961,6 +1031,9 @@ public:
      *     if (!conditionMet()) throw ErrorCode::InvalidResponse;
      * });
      * @endcode
+     *
+     * @note Errors always propagate unchanged - this method only affects the success path
+     * @note To also handle errors, use filter() with both handlers or chain with filterError()
      */
     template<typename SuccessF>
     auto filterSuccess(SuccessF&& successFilter) -> AsyncOp<void> {
@@ -990,6 +1063,9 @@ public:
      *     throw err;  // re-throw after logging
      * });
      * @endcode
+     *
+     * @note Success values always propagate unchanged - this method only affects the error path
+     * @note To also filter success values, use filter() with both handlers or chain with filterSuccess()
      */
     template<typename ErrorF>
     auto filterError(ErrorF&& errorFilter) -> AsyncOp<void> {

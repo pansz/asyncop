@@ -384,6 +384,66 @@ void testOrElse()
     #pragma GCC diagnostic pop
 }
 
+void testOnSuccess()
+{
+    std::cout << "\n=== Testing onSuccess() Terminal Handler ===" << std::endl;
+
+    // Test 1: onSuccess() called on success
+    bool success_called = false;
+    int success_value = 0;
+
+    simulateComputation(10, 50)
+        .onSuccess([&](int value) {
+            success_called = true;
+            success_value = value;
+        });
+
+    runEventLoopFor(100);
+
+    runTest("onSuccess() called on success", true, success_called);
+    runValueTest("onSuccess() received correct value", 20, success_value);
+
+    // Test 2: onSuccess() NOT called on error
+    bool error_success_called = false;
+
+    simulateComputation(10, 50, true)
+        .onSuccess([&](int) {
+            error_success_called = true;  // Should NOT be called
+        });
+
+    runEventLoopFor(100);
+
+    runTest("onSuccess() not called on error", false, error_success_called);
+
+    // Test 3: onSuccess() does not allocate unused AsyncOp (efficiency test)
+    // This is more of a semantic test - verifying the API works as end-of-chain
+    bool efficient_success = false;
+
+    ao::AsyncOp<int>::resolved(42)
+        .onSuccess([&](int value) {
+            efficient_success = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("onSuccess() on resolved op", true, efficient_success);
+
+    // Test 4: onError() can still be called after onSuccess()
+    bool final_error_called = false;
+
+    simulateComputation(10, 50, true)
+        .onSuccess([&](int) {
+            // Should not be called
+        })
+        .onError([&](ao::ErrorCode) {
+            final_error_called = true;
+        });
+
+    runEventLoopFor(100);
+
+    runTest("onError() called after onSuccess() on error", true, final_error_called);
+}
+
 void testRecoverFrom()
 {
     // Intentional usage of deprecated API - testing during deprecation period
@@ -434,6 +494,61 @@ void testRecoverFrom()
             true);
 
     #pragma GCC diagnostic pop
+}
+
+void testRetryImmediate()
+{
+    std::cout << "\n=== Testing retry() Immediate Retry (No Delay) ===" << std::endl;
+
+    int attempt_count = 0;
+    bool succeeded = false;
+
+    auto operation = [&]() {
+        attempt_count++;
+        bool should_fail = (attempt_count < 3);
+        return simulateNetworkRequest("retry-test", 50, should_fail);
+    };
+
+    ao::retry<std::string>(operation, 5)
+    .then([&](std::string response) {
+        succeeded = true;
+    });
+
+    runEventLoopFor(300);
+
+    runTest("retry() succeeded", true, succeeded);
+    runValueTest("retry() attempt count (immediate)", 3, attempt_count);
+}
+
+void testRetryImmediateMaxAttempts()
+{
+    std::cout << "\n=== Testing retry() Max Attempts (No Delay) ===" << std::endl;
+
+    int attempt_count = 0;
+    bool failed = false;
+    ao::ErrorCode error = ao::ErrorCode::None;
+
+    auto operation = [&]() {
+        attempt_count++;
+        return simulateNetworkRequest("always-fail", 50, true);
+    };
+
+    ao::retry<std::string>(operation, 3)
+    .then([](std::string) {
+        // Should not be called
+    })
+    .onError([&](ao::ErrorCode err) {
+        failed = true;
+        error = err;
+    });
+
+    runEventLoopFor(200);
+
+    runTest("retry() failed after max attempts", true, failed);
+    runValueTest("retry() all attempts exhausted", 3, attempt_count);
+    runTest("retry() Max retries error code",
+            ao::ErrorCode::MaxRetriesExceeded == error,
+            true);
 }
 
 void testRecoverBranching()
@@ -1258,22 +1373,103 @@ void testFactoryResolved()
 void testFactoryRejected()
 {
     std::cout << "\n=== Testing Factory: rejected() ===" << std::endl;
-    
+
     bool rejected_called = false;
     ao::ErrorCode rejected_error = ao::ErrorCode::None;
-    
+
     ao::AsyncOp<int>::rejected(ao::ErrorCode::NetworkError)
         .onError([&](ao::ErrorCode err) {
             rejected_called = true;
             rejected_error = err;
         });
-    
+
     runEventLoopFor(100);
-    
+
     runTest("Rejected factory", true, rejected_called);
     runTest("Rejected error code",
             ao::ErrorCode::NetworkError == rejected_error,
             true);
+}
+
+void testMakeFuture()
+{
+    std::cout << "\n=== Testing makeFuture() Factory ===" << std::endl;
+
+    // Test 1: Create future from promise and resolve
+    bool future_resolved = false;
+    int future_value = 0;
+
+    auto promise = ao::makePromise<int>();
+    auto future = ao::makeFuture<int>(promise);
+
+    future.then([&](int value) {
+        future_resolved = true;
+        future_value = value;
+    });
+
+    promise->resolveWith(123);
+    runEventLoopFor(100);
+
+    runTest("makeFuture() resolved", true, future_resolved);
+    runValueTest("makeFuture() value", 123, future_value);
+
+    // Test 2: Create future from promise and reject
+    bool future_rejected = false;
+    ao::ErrorCode future_error = ao::ErrorCode::None;
+
+    auto promise2 = ao::makePromise<std::string>();
+    auto future2 = ao::makeFuture<std::string>(promise2);
+
+    future2.onError([&](ao::ErrorCode err) {
+        future_rejected = true;
+        future_error = err;
+    });
+
+    promise2->rejectWith(ao::ErrorCode::Timeout);
+    runEventLoopFor(100);
+
+    runTest("makeFuture() rejected", true, future_rejected);
+    runTest("makeFuture() error code",
+            ao::ErrorCode::Timeout == future_error,
+            true);
+
+    // Test 3: Using makePromise/makeFuture pattern for external control
+    bool external_resolved = false;
+    int external_value = 0;
+
+    auto external_promise = ao::makePromise<int>();
+    auto external_future = ao::makeFuture<int>(external_promise);
+
+    external_future.then([&](int value) {
+        external_resolved = true;
+        external_value = value;
+    });
+
+    // Resolve from "external" code
+    external_promise->resolveWith(999);
+    runEventLoopFor(100);
+
+    runTest("makeFuture() external resolve", true, external_resolved);
+    runValueTest("makeFuture() external value", 999, external_value);
+
+    // Test 4: Using makePromise for callback capture pattern
+    bool callback_captured = false;
+
+    auto callback_promise = ao::makePromise<void>();
+    auto callback_future = ao::makeFuture<void>(callback_promise);
+
+    callback_future.then([&]() {
+        callback_captured = true;
+    });
+
+    // Capture promise in lambda (common pattern)
+    auto callback = [callback_promise]() {
+        callback_promise->resolveWith();
+    };
+    callback();
+    runEventLoopFor(100);
+
+    runTest("makeFuture() callback capture pattern", true, callback_captured);
 }
 
 void testStateHelpers()
@@ -1925,6 +2121,319 @@ void testFilterWithVoid()
     runTest("filter<void>() error recovery", true, void_error_recovered);
 }
 
+// ══════════════════════════════════════════════
+// ASYNCOP<void> SPECIFIC TESTS
+// ══════════════════════════════════════════════
+
+void testVoidOnSuccess()
+{
+    std::cout << "\n=== Testing AsyncOp<void>::onSuccess() ===" << std::endl;
+
+    // Test 1: onSuccess() called on success
+    bool success_called = false;
+
+    ao::AsyncOp<void>::resolved()
+        .onSuccess([&]() {
+            success_called = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::onSuccess() called", true, success_called);
+
+    // Test 2: onSuccess() NOT called on error
+    bool error_success_called = false;
+
+    ao::AsyncOp<void>::rejected(ao::ErrorCode::NetworkError)
+        .onSuccess([&]() {
+            error_success_called = true;  // Should NOT be called
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::onSuccess() not called on error", false, error_success_called);
+}
+
+void testVoidOtherwise()
+{
+    std::cout << "\n=== Testing AsyncOp<void>::otherwise() ===" << std::endl;
+
+    // Test 1: otherwise() called on error
+    bool otherwise_called = false;
+
+    ao::AsyncOp<void>::rejected(ao::ErrorCode::Timeout)
+        .otherwise([&](ao::ErrorCode err) {
+            otherwise_called = true;
+        })
+        .then([&]() {
+            // Continuation after otherwise
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::otherwise() called", true, otherwise_called);
+
+    // Test 2: otherwise() NOT called on success
+    bool success_otherwise_called = false;
+
+    ao::AsyncOp<void>::resolved()
+        .otherwise([&](ao::ErrorCode) {
+            success_otherwise_called = true;  // Should NOT be called
+        })
+        .then([&]() {
+            // Should be called
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::otherwise() not called on success", false, success_otherwise_called);
+}
+
+void testVoidNext()
+{
+    std::cout << "\n=== Testing AsyncOp<void>::next() ===" << std::endl;
+
+    // Test 1: next() success path
+    bool next_success_called = false;
+
+    ao::AsyncOp<void>::resolved()
+        .next(
+            [&]() { next_success_called = true; },
+            [&](ao::ErrorCode) { /* Should not execute */ }
+        );
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::next() success path", true, next_success_called);
+
+    // Test 2: next() error path
+    bool next_error_called = false;
+
+    ao::AsyncOp<void>::rejected(ao::ErrorCode::NetworkError)
+        .next(
+            [&]() { /* Should not execute */ },
+            [&](ao::ErrorCode err) { next_error_called = true; }
+        );
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::next() error path", true, next_error_called);
+}
+
+void testVoidTap()
+{
+    std::cout << "\n=== Testing AsyncOp<void>::tap() ===" << std::endl;
+
+    // Test 1: tap() called on success
+    bool tap_called = false;
+
+    ao::AsyncOp<void>::resolved()
+        .tap([&]() {
+            tap_called = true;
+        })
+        .then([&]() {
+            // Continuation
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::tap() called", true, tap_called);
+
+    // Test 2: tap() NOT called on error
+    bool error_tap_called = false;
+
+    ao::AsyncOp<void>::rejected(ao::ErrorCode::Timeout)
+        .tap([&]() {
+            error_tap_called = true;  // Should NOT be called
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::tap() not called on error", false, error_tap_called);
+}
+
+void testVoidTapError()
+{
+    std::cout << "\n=== Testing AsyncOp<void>::tapError() ===" << std::endl;
+
+    // Test 1: tapError() called on error
+    bool tapError_called = false;
+    ao::ErrorCode tapError_value = ao::ErrorCode::None;
+
+    ao::AsyncOp<void>::rejected(ao::ErrorCode::NetworkError)
+        .tapError([&](ao::ErrorCode err) {
+            tapError_called = true;
+            tapError_value = err;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::tapError() called", true, tapError_called);
+    runTest("AsyncOp<void>::tapError() received correct error",
+            ao::ErrorCode::NetworkError == tapError_value,
+            true);
+
+    // Test 2: tapError() NOT called on success
+    bool success_tapError_called = false;
+
+    ao::AsyncOp<void>::resolved()
+        .tapError([&](ao::ErrorCode) {
+            success_tapError_called = true;  // Should NOT be called
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::tapError() not called on success", false, success_tapError_called);
+}
+
+void testVoidFinally()
+{
+    std::cout << "\n=== Testing AsyncOp<void>::finally() ===" << std::endl;
+
+    // Test 1: finally() called on success
+    bool finally_success_called = false;
+
+    ao::AsyncOp<void>::resolved()
+        .finally([&]() {
+            finally_success_called = true;
+        })
+        .then([&]() {
+            // Continuation
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::finally() called on success", true, finally_success_called);
+
+    // Test 2: finally() called on error
+    bool finally_error_called = false;
+
+    ao::AsyncOp<void>::rejected(ao::ErrorCode::Timeout)
+        .finally([&]() {
+            finally_error_called = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::finally() called on error", true, finally_error_called);
+}
+
+void testVoidFilterSuccessError()
+{
+    std::cout << "\n=== Testing AsyncOp<void>::filterSuccess()/filterError() ===" << std::endl;
+
+    // Test 1: filterSuccess() pass through
+    bool filterSuccess_passed = false;
+
+    ao::AsyncOp<void>::resolved()
+        .filterSuccess([]() {
+            // Pass through
+        })
+        .then([&]() {
+            filterSuccess_passed = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::filterSuccess() pass through", true, filterSuccess_passed);
+
+    // Test 2: filterSuccess() reject
+    bool filterSuccess_rejected = false;
+
+    ao::AsyncOp<void>::resolved()
+        .filterSuccess([]() {
+            throw ao::ErrorCode::InvalidResponse;
+        })
+        .onError([&](ao::ErrorCode) {
+            filterSuccess_rejected = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::filterSuccess() rejection", true, filterSuccess_rejected);
+
+    // Test 3: filterError() recover
+    bool filterError_recovered = false;
+
+    ao::AsyncOp<void>::rejected(ao::ErrorCode::NetworkError)
+        .filterError([](ao::ErrorCode) {
+            // Recover
+        })
+        .then([&]() {
+            filterError_recovered = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::filterError() recovery", true, filterError_recovered);
+
+    // Test 4: filterError() propagate
+    bool filterError_propagated = false;
+    ao::ErrorCode propagated_error = ao::ErrorCode::None;
+
+    ao::AsyncOp<void>::rejected(ao::ErrorCode::Timeout)
+        .filterError([](ao::ErrorCode err) {
+            if (err == ao::ErrorCode::NetworkError) return;  // Would recover
+            throw err;  // Propagate
+        })
+        .onError([&](ao::ErrorCode err) {
+            filterError_propagated = true;
+            propagated_error = err;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::filterError() propagation", true, filterError_propagated);
+    runTest("AsyncOp<void>::filterError() propagation error preserved",
+            ao::ErrorCode::Timeout == propagated_error,
+            true);
+}
+
+void testVoidTimeout()
+{
+    std::cout << "\n=== Testing AsyncOp<void>::timeout() ===" << std::endl;
+
+    // Test 1: timeout() triggers on slow operation
+    bool timed_out = false;
+    ao::ErrorCode error = ao::ErrorCode::None;
+
+    // Create a pending void operation that would take too long
+    ao::AsyncOp<void> slow_op;
+    auto slow_promise = slow_op.promise();
+
+    ao::add_timeout(std::chrono::milliseconds(200), [slow_promise]() {
+        slow_promise->resolveWith();
+        return false;
+    });
+
+    slow_op
+        .timeout(std::chrono::milliseconds(50))
+        .onError([&](ao::ErrorCode err) {
+            timed_out = (err == ao::ErrorCode::Timeout);
+            error = err;
+        });
+
+    runEventLoopFor(100);
+
+    runTest("AsyncOp<void>::timeout() triggered", true, timed_out);
+    runTest("AsyncOp<void>::timeout() error code",
+            ao::ErrorCode::Timeout == error,
+            true);
+
+    // Test 2: timeout() does not trigger on fast operation
+    bool fast_completed = false;
+
+    ao::AsyncOp<void>::resolved()
+        .timeout(std::chrono::milliseconds(100))
+        .then([&]() {
+            fast_completed = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("AsyncOp<void>::timeout() fast success", true, fast_completed);
+}
+
 void testCancel()
 {
     std::cout << "\n=== Testing cancel() ===" << std::endl;
@@ -2100,17 +2609,18 @@ int test_main_asyncop()
         testBasicAsyncOp();
         testChaining();
         testChainingMixedTypes();
-        
+
         // Error handling
         testErrorHandling();
         testErrorPropagation();
         testErrorInMiddle();
-        
+
         // Error recovery (NEW)
         testOtherwise();
         testOtherwiseWithAsyncOp();
         testOtherwiseRethrow();
         testOtherwiseSuccessPropagation();
+        testOnSuccess();
         testOrElse();
         testRecoverFrom();
         testRecoverBranching();
@@ -2120,15 +2630,17 @@ int test_main_asyncop()
         testNextErrorWithAsyncOp();
         testNextConvergence();
         testNextChaining();
-        
+
         // Timeout
         testTimeout();
         testTimeoutSuccess();
-        
+
         // Retry
         testRetry();
         testRetryMaxAttempts();
-        
+        testRetryImmediate();
+        testRetryImmediateMaxAttempts();
+
         // Collections
         testForEach();
         testForEachFailure();
@@ -2142,19 +2654,20 @@ int test_main_asyncop()
         testRaceFirstFailure();
         testPollUntilSuccess();
         testPollUntilMaxAttempts();
-        
+
         // Utilities
         testIdGeneration();
         testDelay();
         testDefer();
         testDeferException();
-        
+        testMakeFuture();
+
         // Factory & State
         testFactoryResolved();
         testFactoryRejected();
         testStateHelpers();
         testIdempotency();
-        
+
         // Advanced features
         testTap();
         testTapWithError();
@@ -2174,6 +2687,16 @@ int test_main_asyncop()
         testFilterWithVoid();
         testCancel();
         testCancelWithTimerPattern();
+
+        // AsyncOp<void> Specific Tests
+        testVoidOnSuccess();
+        testVoidOtherwise();
+        testVoidNext();
+        testVoidTap();
+        testVoidTapError();
+        testVoidFinally();
+        testVoidFilterSuccessError();
+        testVoidTimeout();
 
         // Integration
         testComplexScenario();

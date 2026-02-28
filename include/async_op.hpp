@@ -141,7 +141,9 @@ using Promise = std::shared_ptr<typename AsyncOp<T>::State>;
  * Represents a pending async operation that resolves with value T or rejects with ErrorCode.
  * Operations chain via .then() and handle errors via .onError().
  * 
- * asyncOp behaves as future, while promise is the shared_ptr of state.
+ * **Terminology:**
+ * - AsyncOp: Acts as the "Future" - a read-only handle to the eventual result
+ * - Promise: std::shared_ptr<State> - the write-side used to complete the operation
  * 
  * @tparam T Result value type
  * 
@@ -297,8 +299,9 @@ public:
      * @param f Function to execute on success
      * @return New AsyncOp for chained operation
      *
-     * @warning Calling then() multiple times for the same object is an error.
-     * Use chained call like op.then(f).then(g); instead of op.then(f); op.then(g);
+     * @warning Calling then() multiple times on the same AsyncOp instance will trigger an assertion.
+     *          For sequential operations, chain them: op.then(f).then(g)
+     *          For branching, store the original: auto op = fetch(); op.then(f); op.recover(g);
      */
     template<typename F>
     auto then(F&& f) -> AsyncOp<unwrap_async_op_t<typename std::invoke_result<F, T>::type>> {
@@ -379,13 +382,26 @@ public:
     }
 
     /**
-     * @brief Set success handler at the end of the chain
+     * @brief Set terminal success handler without creating a new AsyncOp
      *
-     * This handler does not create a new AsyncOp, so it saves memory when it is the last action in the chain.
-     * if you use then() as the last action in the chain, the last asyncop created by then() will never
-     * resolve, which is not a logical problem but causes an extra memory allocation and release.
-     * @warning Calling onSuccess() on the same object multiple times will be an error
-     * @warning If not the last handler in chain, the next handler must be onError()
+     * Use onSuccess() as the final handler in a chain to avoid allocating an unused AsyncOp.
+     * When then() is used as the last action, it creates a new AsyncOp that never gets used,
+     * wasting a memory allocation. This is not incorrect, just inefficient.
+     *
+     * @warning Calling onSuccess() multiple times on the same AsyncOp instance will trigger an assertion
+     * @warning After onSuccess(), only onError() can be called (chain is effectively terminated)
+     *
+     * @code
+     * // Efficient: no unused AsyncOp allocation
+     * fetchData().then(process).onSuccess([](Result r) { 
+     *     spdlog::info("Done: {}", r); 
+     * });
+     *
+     * // Less efficient: then() creates unused AsyncOp
+     * fetchData().then(process).then([](Result r) { 
+     *     spdlog::info("Done: {}", r); 
+     * }); // Returns AsyncOp that's never used
+     * @endcode
      */
     AsyncOp<T>& onSuccess(std::function<void(T)> handler) {
         spdlog::trace("AsyncOp[{}] setting success handler", id());
@@ -409,13 +425,28 @@ public:
     }
 
     /**
-     * @brief Set error handler
+     * @brief Set terminal error handler without creating a new AsyncOp
      * 
-     * this function can be the end of chain as .onSuccess().onError();
-     * or called like .onError().then() to overwrite the error handler of the next then()
-     * @warning Calling onError() on the same object multiple times will be an error.
-     * @warning If chained after onSuccess(), it must be the end of chain.
-     * @warning If it is not end of chain, the next handler must be then().
+     * This method can be used in two ways:
+     * 1. As end-of-chain: .onSuccess().onError() or .then().onError()
+     * 2. Before then(): .onError().then() to set error handler before the next then() call
+     *
+     * @warning Calling onError() multiple times on the same AsyncOp instance will trigger an assertion
+     * @warning After onSuccess().onError(), the chain is terminated (no further calls allowed)
+     * @warning When used mid-chain, the next call must be then() to propagate success values
+     *
+     * @code
+     * // Pattern 1: End of chain
+     * fetchData()
+     *     .then(process)
+     *     .onSuccess([](Result r) { display(r); })
+     *     .onError([](ErrorCode e) { logError(e); });
+     *
+     * // Pattern 2: Set error handler before then()
+     * fetchData()
+     *     .onError([](ErrorCode e) { logError(e); })
+     *     .then([](Data d) { return process(d); }); // then() still needed for success path
+     * @endcode
      */
     AsyncOp<T>& onError(std::function<void(ErrorCode)> handler) {
         spdlog::trace("AsyncOp[{}] setting error handler", id());
@@ -446,7 +477,11 @@ public:
      * - Retry the operation on failure
      * - Transform the error into a valid result
      * 
-     * Handler can return T (recovery succeeds) or AsyncOp<T>, or re-throw to propagate error.
+     * **Handler behavior:**
+     * - Return T or AsyncOp<T>: Recovery succeeds, operation becomes successful
+     * - throw ErrorCode: Propagate the error (same or different error code)
+     * - throw std::exception: Caught and converted to ErrorCode::Exception
+     * 
      * Success values automatically propagate through (no handler needed).
      * 
      * @tparam F Function type (ErrorCode -> T or ErrorCode -> AsyncOp<T>)
@@ -569,26 +604,31 @@ public:
     }
 
     /**
-     * @brief Handle both success and error paths, converging to same success type
+     * @brief Transform both success and error paths, converging to same result type
      * 
-     * The next() method allows you to provide both a success handler and an error handler,
-     * both of which must return the same type U. This enables different processing for
-     * success and error cases while continuing the same chain afterward.
+     * The next() method requires both a success handler and an error handler,
+     * where both must return the same type U (or AsyncOp<U>). Use this when you need
+     * different processing logic for success vs error, but want both paths to produce
+     * the same output type and continue the chain.
      * 
-     * one sentence: this is the next step in the chain, regardless of the previous step's result
+     * **Key concept:** This is the "next step" that executes regardless of whether 
+     * the previous operation succeeded or failed - both paths lead to the same result type.
      * 
      * @tparam SuccessF Success handler function type (T -> U or T -> AsyncOp<U>)
      * @tparam ErrorF Error handler function type (ErrorCode -> U or ErrorCode -> AsyncOp<U>)
-     * @param success_handler Function to handle success values
-     * @param error_handler Function to handle errors
+     * @param success_handler Function to transform success values
+     * @param error_handler Function to transform errors
      * @return New AsyncOp<U> that continues from either path
      * 
      * **Behavior:**
-     * - If operation succeeds: success_handler executes, result goes to next operation
-     * - If operation fails: error_handler executes, result goes to next operation
+     * - Operation succeeds → success_handler(value) executes → returns U
+     * - Operation fails → error_handler(error) executes → returns U
      * - Both handlers must return the same type U (or AsyncOp<U>)
      * 
-     * Benefit: Different processing, same continuation point
+     * **Use cases:**
+     * - Guarantee a result regardless of success/failure (e.g., always return a User object)
+     * - Different processing logic but same continuation point
+     * - Cleaner than chaining .then().recover() when types align
      */
     template<typename SuccessF, typename ErrorF>
     auto next(SuccessF&& success_handler, ErrorF&& error_handler) {
@@ -789,11 +829,33 @@ public:
     /**
      * @brief Execute side effect on error without modifying the error
      * 
-     * Useful for logging errors, metrics, debugging. Error passes through unchanged.
-     * The side effect receives the ErrorCode, executes, then the error is rethrown.
-     * Exceptions in side effect are caught and logged but don't affect the chain.
+     * Error-path counterpart to tap(). Allows inspection or logging when errors occur,
+     * while passing the error through unchanged to the next handler. Useful for debugging,
+     * metrics collection, or error notification without affecting the error chain.
      * 
-     * Equivalent to: filterError([](ErrorCode err) -> T { side_effect_fn(err); throw err; })
+     * @tparam F Function type: (ErrorCode -> void)
+     * @param side_effect_fn Function to execute when error occurs
+     * @return AsyncOp<T> with same error propagated unchanged
+     * 
+     * **Behavior:**
+     * - Success values pass through without calling side_effect_fn
+     * - On error: side_effect_fn(err) executes, then error is thrown to propagate
+     * - Exceptions in side_effect_fn are caught and logged (don't affect the chain)
+     * 
+     * @code
+     * fetchUser(id)
+     *     .then([](User u) { return processUser(u); })
+     *     .tapError([](ErrorCode err) {
+     *         spdlog::error("User processing failed: {}", err);
+     *         metrics.increment("user_errors");
+     *     })
+     *     .recover([](ErrorCode err) {
+     *         return User::defaultUser();
+     *     });
+     * @endcode
+     * 
+     * @note Equivalent to: filterError([f](ErrorCode err) -> T { f(err); throw err; })
+     * @note For error recovery (changing error to success), use recover() or filterError()
      */
     template<typename F>
     AsyncOp<T> tapError(F&& side_effect_fn) {
@@ -985,30 +1047,40 @@ public:
     }
 
     /**
-     * @brief Filter with dual-path handling for success and error
+     * @brief Filter both success and error paths using throw/return semantics
      *
-     * Provides unified filtering for both success and error paths:
-     * - Success filter: Return T to pass through, throw ErrorCode to reject
-     * - Error filter: Return T to recover, throw ErrorCode to propagate
+     * Provides unified filtering for both paths with intuitive throw/return control flow:
+     * - **Success filter:** Return T to pass through (possibly transformed), throw ErrorCode to reject
+     * - **Error filter:** Return T to recover (convert to success), throw ErrorCode to propagate error
      *
      * @tparam SuccessF Success filter function type (T -> T)
      * @tparam ErrorF Error filter function type (ErrorCode -> T)
      * @param successFilter Filter for success path. Return value to pass, throw ErrorCode to reject.
-     * @param errorFilter Filter for error path. Return value to recover, throw to propagate.
-     * @return New AsyncOp<T> with filtering applied
+     * @param errorFilter Filter for error path. Return value to recover, throw ErrorCode to propagate.
+     * @return New AsyncOp<T> with filtering applied to both paths
      *
-     * @note For single-path filtering, use filterSuccess() or filterError() for clearer intent.
+     * **Use filter() when:**
+     * - You need to validate/transform success values AND handle specific errors
+     * - Both paths need filtering/validation logic
+     * 
+     * **For single-path filtering, use filterSuccess() or filterError() for clearer intent.**
      *
      * @code
-     * // Both filters: validate success AND recover from errors
-     * op.filter(
-     *     [](User& u) -> User {
-     *         if (!u.isValid()) throw ErrorCode::InvalidResponse;
-     *         return std::move(u);
+     * // Dual filter: validate success AND recover from specific errors
+     * fetchUser(id).filter(
+     *     // Success filter: validate
+     *     [](User user) -> User {
+     *         if (!user.isValid()) {
+     *             throw ErrorCode::InvalidResponse;  // Reject invalid user
+     *         }
+     *         return user;  // Pass valid user through
      *     },
+     *     // Error filter: recover from timeout
      *     [](ErrorCode err) -> User {
-     *         if (err == ErrorCode::Timeout) return getDefaultUser();
-     *         throw err;  // propagate other errors
+     *         if (err == ErrorCode::Timeout) {
+     *             return getCachedUser();  // Convert timeout to success
+     *         }
+     *         throw err;  // Propagate other errors
      *     }
      * );
      * @endcode
@@ -1129,6 +1201,9 @@ public:
      *     return value * 2;
      * });
      * @endcode
+     * 
+     * @note Errors always propagate unchanged - this method only affects the success path
+     * @note To also handle errors, use filter() with both handlers or chain with filterError()
      */
     template<typename SuccessF>
     auto filterSuccess(SuccessF&& successFilter) -> AsyncOp<T> {
@@ -1158,6 +1233,9 @@ public:
      *     throw err;  // re-throw after logging
      * });
      * @endcode
+     * 
+     * @note Success values always propagate unchanged - this method only affects the error path
+     * @note To also filter success values, use filter() with both handlers or chain with filterSuccess()
      */
     template<typename ErrorF>
     auto filterError(ErrorF&& errorFilter) -> AsyncOp<T> {
@@ -1308,7 +1386,7 @@ AsyncOp<T> retryWithBackoff(F&& operation, int max_attempts,
  */
 template<typename T, typename F>
 AsyncOp<T> retry(F&& operation, int max_attempts) {
-    return retryWithBackoff(std::forward<F>(operation), max_attempts,
+    return retryWithBackoff<T>(std::forward<F>(operation), max_attempts,
                            std::chrono::milliseconds(0));
 }
 
