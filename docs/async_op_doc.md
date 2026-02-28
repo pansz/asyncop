@@ -107,22 +107,27 @@ AsyncOp uses the **Promise/Future pattern**:
   - Captured in async callbacks to settle the operation
   - Obtained via `.promise()` method on AsyncOp
 
-### The Six Core Methods
+### The Eight Core Methods
 
 | Method | Purpose | When Used | Continues Chain? | Overwrite Protection |
 |--------|---------|-----------|------------------|----------------------|
-| **`.then()`** | Transform success values | Success path | ✅ Yes (can change type) | Prevents overwriting existing success callbacks |
-| **`.next()`** | Handle both paths | Dual processing | ✅ Yes (converges types) | Prevents overwriting existing callbacks |
-| **`.recover()`** / **`.otherwise()`** | Convert errors to success | Error recovery | ✅ Yes (error→value) | Allows overwrite if previous callback was for propagation |
-| **`.onSuccess()`** | Final success handling | Success path (terminal) | ❌ No | Prevents overwriting existing success callbacks |
-| **`.onError()`** | Final error handling | Error path (terminal) | ❌ No | Prevents overwriting existing error callbacks |
-| **`.tap()`** | Side effects | Debugging/logging | ✅ Yes (value unchanged) | Does not prevent subsequent overwrites |
+| **`.then()`** | Transform success values | Success path | ✅ Yes (value to value, error unchanged) | Prevents overwriting success, allow error callback to be overwrite |
+| **`.next()`** | Handle both paths | Dual processing | ✅ Yes (error/value to value) | Prevents overwriting existing callbacks |
+| **`.recover()`** | Convert errors to success | Error recovery | ✅ Yes (error to value, value unchanged) | Prevents overwriting error, allow success callback to be overwrite |
+| **`.filter()`** | Dual-path filtering | Success/error filtering | ✅ Yes (converges types) | depends on canOverwriteCallback() |
+| **`.onSuccess()`** | Final success handling | Success path (terminal) | ❌ No | overwriting next success callback |
+| **`.onError()`** | Final error handling | Error path (terminal) | ❌ No | overwriting next error callback |
+| **`.tap()`** | Side effects on success | Debugging/logging | ✅ Yes (all unchanged) | Inserts a node in chain and will not overwrite |
+| **`ao::delay()`** | Delayed execution | Timing/scheduling | ✅ Yes (returns AsyncOp<void>) | N/A (static factory) |
+
+**Note:** `.otherwise()` is a semantic alias for `.recover()` (identical functionality, clearer intent for branching).
+`tapError()` is a convenience wrapper around `filterError()` for error-side side effects.
 
 ### Flow Visualization
 
 ```
 Linear Success Chain:
-    operation → .then() → .then() → .then() → success!
+    operation → .then() → .then() → .then() → success! (chain can continue)
                    ↓         ↓         ↓
                    └─────────┴─────────→ .onError() (if any fails)
 
@@ -132,14 +137,14 @@ Terminal Success Chain:
                    └─────────┴─────→ .onError() (if any fails)
 
 Error Recovery (Single Chain):
-    operation → .recover() → .then() → success!
+    operation → .recover() → .then() → success! (chain can continue)
        ↓             ↓
      error      recovers to value
 
 Dual-Path Handling (Convergent):
     operation
        ├─ success → success_handler ─┐
-       │                              ├─→ .next() → single continuation
+       │                              ├─→ .next() → (chain can continue)
        └─ error   → error_handler   ─┘
 
 Independent Branching (Mutually Exclusive):
@@ -520,6 +525,31 @@ operation()
 - Debug breakpoints
 - Validation (throw to convert to error)
 
+#### tapError()
+
+Execute side effects on error without modifying the error:
+
+```cpp
+operation()
+    .tapError([](ao::ErrorCode err) {
+        // Side effects - error passes through unchanged
+        spdlog::error("Operation failed with error: {}", err);
+        recordMetric("operation_failure");
+    })
+    .onError([](ao::ErrorCode err) {
+        // err is unchanged from before tapError()
+        handleError(err);
+    });
+```
+
+**Use cases:**
+- Error logging
+- Error metrics collection
+- Debug breakpoints for errors
+- Equivalent to: `filterError([](ErrorCode err) { side_effect_fn(err); throw err; })`
+
+**Note:** Exceptions caught in the side effect are logged but don't affect the chain - the original error continues to propagate.
+
 #### finally()
 
 Always execute cleanup code:
@@ -615,16 +645,15 @@ operation()
 
 ### Success Filter Only
 
-Pass `nullptr` for error filter to propagate errors unchanged:
+Use filterSuccess and propagate errors unchanged:
 
 ```cpp
 fetchData()
-    .filter(
+    .filterSuccess(
         [](Data& d) -> Data {
             if (d.empty()) throw ao::ErrorCode::InvalidResponse;
             return std::move(d);
-        },
-        nullptr  // Errors propagate unchanged
+        } // Errors propagate unchanged
     )
     .onError([](ao::ErrorCode err) {
         // Catches both fetch errors and validation errors
@@ -634,12 +663,11 @@ fetchData()
 
 ### Error Filter Only
 
-Pass `nullptr` for success filter to pass values unchanged:
+Use filterError to pass success values unchanged:
 
 ```cpp
 fetchData()
-    .filter(
-        nullptr,  // Success propagates unchanged
+    .filterError(  // Success propagates unchanged
         [](ao::ErrorCode err) -> Data {
             // Recovery logic - equivalent to recoverFrom() but more flexible
             if (err == ao::ErrorCode::NetworkError) {
@@ -1170,12 +1198,21 @@ public:
     AsyncOp<T>& onSuccess(std::function<void(T)> handler);
     // NOTE: Callback overwrite protection prevents overwriting existing success callbacks
     // unless the previous callback was a propagation callback.
-    // WARNING: If not the last handler in chain, the next handler must be recover() or otherwise().
+    // WARNING: Calling onSuccess() multiple times will be an error.
+    // WARNING: If not the last handler in chain, the next handler must be onError().
 
     AsyncOp<T>& onError(std::function<void(ErrorCode)> handler);
     // NOTE: Callback overwrite protection prevents overwriting existing error callbacks
     // unless the previous callback was a propagation callback.
-    // WARNING: If not the last handler in chain, the next handler must be then().
+    // WARNING: Calling onError() multiple times will be an error.
+    // WARNING: If chained after onSuccess(), it must be the end of chain.
+    // WARNING: If it is not end of chain, the next handler must be then().
+
+    template<typename F>
+    AsyncOp<T> tapError(F&& side_effect_fn);
+    // Execute side effect on error without modifying the error
+    // Useful for logging errors, metrics, debugging. Error passes through unchanged.
+    // Equivalent to: filterError([](ErrorCode err) { side_effect_fn(err); throw err; })
 
     // Cancellation
     AsyncOp<T>& cancel(ErrorCode code = ErrorCode::Cancelled);
@@ -1200,7 +1237,6 @@ public:
     // Dual-path filtering for success and error handling
     // Success filter: return T to pass, throw ErrorCode to reject
     // Error filter: return T to recover, throw ErrorCode to propagate
-    // Pass nullptr for unused filter path (propagates unchanged)
 
     // Deprecated methods
     [[deprecated]] AsyncOp<T> orElse(T fallback_value, const std::string& log_msg = "");
@@ -1216,7 +1252,7 @@ public:
 When using terminal handlers like `onSuccess()` and `onError()`, be aware of the following constraints:
 
 1. **`.onSuccess()` as terminal handler**: When using `onSuccess()` as a terminal success handler,
-   if it's not the last handler in the chain, the next handler must be `recover()` or `otherwise()`.
+   if it's not the last handler in the chain, the next handler must be `onError()`.
 
 2. **`.onError()` as terminal handler**: When using `onError()` as a terminal error handler,
    if it's not the last handler in the chain, the next handler must be `then()`.
@@ -1226,11 +1262,11 @@ When using terminal handlers like `onSuccess()` and `onError()`, be aware of the
    if no handler exists or if the previous handler was a propagation callback.
 
 ```cpp
-// ✅ CORRECT: onSuccess followed by recover (valid combination)
+// ✅ CORRECT: onSuccess followed by onError (valid combination)
 operation()
     .then([](T val) { return process(val); })
     .onSuccess([](ProcessedVal val) { display(val); })  // Terminal success handler
-    .recover([](ErrorCode err) { return getDefault(); }); // Next must be recover/otherwise
+    .onError([](ErrorCode err) { logError(err); });     // Next must be onError
 
 // ✅ CORRECT: onError followed by then (valid combination)  
 operation()
@@ -1242,7 +1278,7 @@ operation()
 operation()
     .then([](T val) { return process(val); })
     .onSuccess([](ProcessedVal val) { display(val); })  // Terminal success handler
-    .then([](T val) { return transform(val); });         // ERROR: Should be recover/otherwise
+    .then([](T val) { return transform(val); });         // ERROR: Should be onError
 ```
 
 ### Promise<T> (Type Alias)
@@ -2037,22 +2073,37 @@ ao::AsyncOp<Result> computeAsync() {
 
 ---
 
-## What's New in v2.4.1
+## What's New in v2.4
 
-### Major Changes
+### New Error Handling & Filtering APIs
 
-**✨ New Convenience Wrappers for filter()**
+**✨ Dual-Path Filtering with `filter()`**
 
-- Added `filterSuccess()` - Wrapper for success-only filtering (errors propagate unchanged)
-- Added `filterError()` - Wrapper for error-only filtering (success propagates unchanged)
-- Provides clearer intent than `filter(nullptr, ...)` pattern
-- `nullptr` pattern is now internal implementation detail, not documented public API
+- New `filter()` method for unified success/error path handling
+- Success filter: return value to pass through, throw `ErrorCode` to reject
+- Error filter: return value to recover, throw `ErrorCode` to propagate
+- Added `filterSuccess()` - Filter success path only, errors propagate unchanged
+- Added `filterError()` - Filter error path only, success propagates unchanged
 
-**🔧 Bug Fixes**
+**✨ Error Side Effects with `tapError()`**
 
-- Fixed `next()` nullptr handling - Changed `static_assert(false, ...)` to `static_assert(dependent_false_v<T>, ...)` to allow proper `if constexpr` branch compilation
-- Updated `recoverFrom()` deprecation to reference `filterError()`
-- Added deprecation warning suppression for tests covering deprecated APIs
+- Added `tapError()` - Execute side effects on error without modifying the error
+- Useful for error logging, metrics collection, and debugging
+- Equivalent to `filterError([](ErrorCode err) { side_effect_fn(err); throw err; })`
+
+**✨ Operation Cancellation**
+
+- Added `cancel()` - Reject pending operations with configurable error code
+- Returns `*this` for chaining, no-op if already settled
+
+### Bug Fixes
+
+- Fixed `next()` nullptr handling with dependent `static_assert` for proper `if constexpr` compilation
+
+### API Deprecations
+
+- `orElse()` - Use `otherwise()` with explicit fallback logic instead
+- `recoverFrom()` - Use `filterError()` for more flexible error handling
 
 ---
 

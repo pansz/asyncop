@@ -297,9 +297,8 @@ public:
      * @param f Function to execute on success
      * @return New AsyncOp for chained operation
      *
-     * @warning Calling then() multiple times will be ignored.
-     * Only the FIRST then() executes. Use tap() for side effects or chain properly.
-     * @warning Calling then() after onSuccess() is a logic error.
+     * @warning Calling then() multiple times for the same object is an error.
+     * Use chained call like op.then(f).then(g); instead of op.then(f); op.then(g);
      */
     template<typename F>
     auto then(F&& f) -> AsyncOp<unwrap_async_op_t<typename std::invoke_result<F, T>::type>> {
@@ -378,11 +377,15 @@ public:
 
         return next_op;
     }
-    
+
     /**
-     * @brief Set success handler
-     * @warning Calling onSuccess() multiple times will be ignored.
-     * @warning If not the last handler in chain, the next handler must be recover() or otherwise().
+     * @brief Set success handler at the end of the chain
+     *
+     * This handler does not create a new AsyncOp, so it saves memory when it is the last action in the chain.
+     * if you use then() as the last action in the chain, the last asyncop created by then() will never
+     * resolve, which is not a logical problem but causes an extra memory allocation and release.
+     * @warning Calling onSuccess() on the same object multiple times will be an error
+     * @warning If not the last handler in chain, the next handler must be onError()
      */
     AsyncOp<T>& onSuccess(std::function<void(T)> handler) {
         spdlog::trace("AsyncOp[{}] setting success handler", id());
@@ -407,8 +410,12 @@ public:
 
     /**
      * @brief Set error handler
-     * @warning Calling onError() multiple times will be ignored.
-     * @warning If not the last handler in chain, the next handler must be then().
+     * 
+     * this function can be the end of chain as .onSuccess().onError();
+     * or called like .onError().then() to overwrite the error handler of the next then()
+     * @warning Calling onError() on the same object multiple times will be an error.
+     * @warning If chained after onSuccess(), it must be the end of chain.
+     * @warning If it is not end of chain, the next handler must be then().
      */
     AsyncOp<T>& onError(std::function<void(ErrorCode)> handler) {
         spdlog::trace("AsyncOp[{}] setting error handler", id());
@@ -562,11 +569,13 @@ public:
     }
 
     /**
-     * @brief Handle both success and error paths, converging to same type
+     * @brief Handle both success and error paths, converging to same success type
      * 
      * The next() method allows you to provide both a success handler and an error handler,
      * both of which must return the same type U. This enables different processing for
      * success and error cases while continuing the same chain afterward.
+     * 
+     * one sentence: this is the next step in the chain, regardless of the previous step's result
      * 
      * @tparam SuccessF Success handler function type (T -> U or T -> AsyncOp<U>)
      * @tparam ErrorF Error handler function type (ErrorCode -> U or ErrorCode -> AsyncOp<U>)
@@ -774,6 +783,31 @@ public:
                 spdlog::warn("Unknown exception in tap()");
             }
             return value;
+        });
+    }
+
+    /**
+     * @brief Execute side effect on error without modifying the error
+     * 
+     * Useful for logging errors, metrics, debugging. Error passes through unchanged.
+     * The side effect receives the ErrorCode, executes, then the error is rethrown.
+     * Exceptions in side effect are caught and logged but don't affect the chain.
+     * 
+     * Equivalent to: filterError([](ErrorCode err) -> T { side_effect_fn(err); throw err; })
+     */
+    template<typename F>
+    AsyncOp<T> tapError(F&& side_effect_fn) {
+        spdlog::trace("AsyncOp[{}] adding tapError", id());
+        
+        return this->filter(nullptr, [f = std::forward<F>(side_effect_fn)](ErrorCode err) mutable -> T {
+            try {
+                f(err);
+            } catch (const std::exception& e) {
+                spdlog::warn("Exception in tapError(): {}", e.what());
+            } catch (...) {
+                spdlog::warn("Unknown exception in tapError()");
+            }
+            throw err;
         });
     }
 

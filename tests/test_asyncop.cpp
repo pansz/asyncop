@@ -1157,8 +1157,8 @@ void testIdGeneration()
     runTest("extractTimestamp works", extractedTimestamp > 0, true);
     runTest("extractCounter works", extractedCounter >= 0, true);
     
-    // Test 4: Reconstruction consistency
-    uint64_t reconstructed = (static_cast<uint64_t>(extractedTimestamp) << 22) | extractedCounter;
+    // Test 4: Reconstruction consistency (uses 21 bits for counter, 42 bits for timestamp)
+    uint64_t reconstructed = (static_cast<uint64_t>(extractedTimestamp) << 21) | extractedCounter;
     runTest("ID reconstruction", static_cast<int64_t>(reconstructed) == sampleId, true);
 }
 
@@ -1398,6 +1398,64 @@ void testTapWithError()
     
     runTest("tap() not executed on error", false, tap_executed);
     runTest("Error caught after tap", true, error_caught);
+}
+
+void testTapError()
+{
+    std::cout << "\n=== Testing tapError() ===" << std::endl;
+    
+    bool tapError_executed = false;
+    ao::ErrorCode tapError_value = ao::ErrorCode::None;
+    bool error_caught = false;
+    ao::ErrorCode caught_error = ao::ErrorCode::None;
+    
+    simulateComputation(21, 50, true)
+        .tapError([&](ao::ErrorCode err) {
+            tapError_executed = true;
+            tapError_value = err;
+        })
+        .then([](int value) {
+            // Should NOT execute
+        })
+        .onError([&](ao::ErrorCode err) {
+            error_caught = true;
+            caught_error = err;
+        });
+    
+    runEventLoopFor(150);
+    
+    runTest("tapError() executed", true, tapError_executed);
+    runTest("tapError() saw correct error code",
+            ao::ErrorCode::InvalidResponse == tapError_value,
+            true);
+    runTest("Error caught after tapError()", true, error_caught);
+    runTest("Error preserved through tapError()",
+            ao::ErrorCode::InvalidResponse == caught_error,
+            true);
+}
+
+void testTapErrorWithSuccess()
+{
+    std::cout << "\n=== Testing tapError() with Success Path ===" << std::endl;
+    
+    bool tapError_executed = false;
+    bool then_executed = false;
+    int final_value = 0;
+    
+    simulateComputation(21, 50)
+        .tapError([&](ao::ErrorCode err) {
+            tapError_executed = true;
+        })
+        .then([&](int value) {
+            then_executed = true;
+            final_value = value;
+        });
+    
+    runEventLoopFor(150);
+    
+    runTest("tapError() not executed on success", false, tapError_executed);
+    runTest("then() executed after tapError()", true, then_executed);
+    runValueTest("Value passed through tapError() unchanged", 42, final_value);
 }
 
 void testFinally()
@@ -2100,6 +2158,8 @@ int test_main_asyncop()
         // Advanced features
         testTap();
         testTapWithError();
+        testTapError();
+        testTapErrorWithSuccess();
         testFinally();
         testFinallyOnError();
         testAllSettled();

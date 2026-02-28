@@ -44,7 +44,7 @@ public:
         // Combined status and flags to reduce memory footprint
         struct StatusFlags {
             unsigned int status : 2;                    // 2 bits: Pending/Resolved/Rejected
-            unsigned int error_code : 4;                // 4 bits: enough for ErrorCode enum
+            unsigned int error_code : 4;                // 4 bits: ErrorCode enum (static_assert enforces < 16 values)
             unsigned int success_cb_is_propagating : 1; // 1 bit: flag for success callback
             unsigned int error_cb_is_propagating : 1;   // 1 bit: flag for error callback
             unsigned int reserved : 24;                 // 24 bits: reserved for future use
@@ -161,9 +161,8 @@ public:
      * @param f Function to execute on success
      * @return New AsyncOp for chained operation
      *
-     * @warning Calling then() multiple times will be ignored.
-     * Only the FIRST then() executes. Use tap() for side effects or chain properly.
-     * @warning Calling then() after onSuccess() is a logic error.
+     * @warning Calling then() multiple times for the same object is an error.
+     * Use chained call like op.then(f).then(g); instead of op.then(f); op.then(g);
      */
     template<typename F>
     auto then(F&& f) -> AsyncOp<unwrap_async_op_t<typename std::invoke_result<F>::type>> {
@@ -245,8 +244,8 @@ public:
 
     /**
      * @brief Set success handler
-     * @warning Calling onSuccess() multiple times will be ignored.
-     * @warning If not the last handler in chain, the next handler must be recover() or otherwise().
+     * @warning Calling onSuccess() multiple times will be an error
+     * @warning If not the last handler in chain, the next handler must be onError()
      */
     AsyncOp<void>& onSuccess(std::function<void()> handler) {
         spdlog::trace("AsyncOp[{}] setting success handler", id());
@@ -271,8 +270,9 @@ public:
 
     /**
      * @brief Set error handler
-     * @warning Calling onError() multiple times will be ignored.
-     * @warning If not the last handler in chain, the next handler must be then().
+     * @warning Calling onError() multiple times will be an error.
+     * @warning If chained after onSuccess(), it must be the end of chain.
+     * @warning If it is not end of chain, the next handler must be then().
      */
     AsyncOp<void>& onError(std::function<void(ErrorCode)> handler) {
         spdlog::trace("AsyncOp[{}] setting error handler", id());
@@ -628,6 +628,31 @@ public:
     }
 
     /**
+     * @brief Execute side effect on error without modifying the error
+     * 
+     * Useful for logging errors, metrics, debugging. Error passes through unchanged.
+     * The side effect receives the ErrorCode, executes, then the error is rethrown.
+     * Exceptions in side effect are caught and logged but don't affect the chain.
+     * 
+     * Equivalent to: filterError([](ErrorCode err) { side_effect_fn(err); throw err; })
+     */
+    template<typename F>
+    AsyncOp<void> tapError(F&& side_effect_fn) {
+        spdlog::trace("AsyncOp[{}] adding tapError", id());
+        
+        return this->filter(nullptr, [f = std::forward<F>(side_effect_fn)](ErrorCode err) mutable {
+            try {
+                f(err);
+            } catch (const std::exception& e) {
+                spdlog::warn("Exception in tapError(): {}", e.what());
+            } catch (...) {
+                spdlog::warn("Unknown exception in tapError()");
+            }
+            throw err;
+        });
+    }
+
+    /**
      * @brief Execute cleanup function regardless of success/failure
      * 
      * Similar to try-finally. Cleanup executes whether operation succeeds or fails.
@@ -962,6 +987,7 @@ public:
      * // Log all errors but propagate
      * op.filterError([](ErrorCode err) {
      *     spdlog::warn("Operation failed: {}", err);
+     *     throw err;  // re-throw after logging
      * });
      * @endcode
      */
