@@ -453,19 +453,26 @@ asyncop/
 ├── include/
 │   ├── async_op.hpp           # Main AsyncOp implementation
 │   ├── async_op_void.hpp      # Specialization for AsyncOp<void>
-│   ├── ao_event_loop.hpp      # Event loop abstraction
-│   └── msg_registry.hpp       # Message-based async (optional)
+│   ├── ao_event_loop.hpp      # Event loop abstraction (GLib/Qt)
+│   └── msg_registry.hpp       # Message-based async tracker (optional)
 ├── docs/
-│   └── async_op_doc.md  # Complete documentation
+│   └── async_op_doc.md        # Complete documentation
 ├── examples/
-│   ├── example_basic_glib.cpp
-│   ├── example_basic_qt.cpp
-│   ├── example_collections.cpp
-│   └── example_threading.cpp
+│   ├── CMakeLists.txt
+│   ├── example_callback_conversion.cpp
+│   ├── example_message_registry.cpp
+│   └── example_qt_http.cpp
 ├── tests/
-│   ├── test_asyncop_glib.cpp
-│   └── test_asyncop_qt.cpp
-└── CMakeLists.txt
+│   ├── CMakeLists.txt
+│   ├── test_asyncop.cpp       # Shared test implementation
+│   ├── testmain_glib.cpp      # GLib backend test entry point
+│   └── testmain_qt.cpp        # Qt backend test entry point
+├── CMakeLists.txt             # Root CMake configuration
+├── README.md                  # Project overview
+├── LICENSE                    # MIT license
+├── CHANGELOG.md               # Version history
+├── CONTRIBUTING.md            # Contribution guidelines
+└── CLAUDE.md                  # Development guidelines
 ```
 
 ---
