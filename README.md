@@ -456,7 +456,7 @@ asyncop/
 │   ├── ao_event_loop.hpp      # Event loop abstraction
 │   └── msg_registry.hpp       # Message-based async (optional)
 ├── docs/
-│   └── AsyncOp_Documentation.md  # Complete documentation
+│   └── async_op_doc.md  # Complete documentation
 ├── examples/
 │   ├── example_basic_glib.cpp
 │   ├── example_basic_qt.cpp
