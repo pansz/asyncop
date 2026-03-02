@@ -471,8 +471,7 @@ asyncop/
 ├── README.md                  # Project overview
 ├── LICENSE                    # MIT license
 ├── CHANGELOG.md               # Version history
-├── CONTRIBUTING.md            # Contribution guidelines
-└── CLAUDE.md                  # Development guidelines
+└── CONTRIBUTING.md            # Contribution guidelines
 ```
 
 ---
