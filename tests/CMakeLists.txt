@@ -40,3 +40,21 @@ if(Qt5_FOUND)
     add_test(NAME test_asyncop_qt COMMAND test_asyncop_qt)
 endif()
 add_test(NAME test_asyncop_glib COMMAND test_asyncop_glib)
+
+# Valgrind memory leak checks
+find_program(VALGRIND_EXECUTABLE valgrind)
+if(VALGRIND_EXECUTABLE)
+    add_custom_target(check_leaks_glib
+        COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --error-exitcode=1 --show-leak-kinds=all $<TARGET_FILE:test_asyncop_glib>
+        DEPENDS test_asyncop_glib
+        COMMENT "Running valgrind memory leak check on GLib backend tests"
+    )
+
+    if(Qt5_FOUND)
+        add_custom_target(check_leaks_qt
+            COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --error-exitcode=1 --show-leak-kinds=all $<TARGET_FILE:test_asyncop_qt>
+            DEPENDS test_asyncop_qt
+            COMMENT "Running valgrind memory leak check on Qt backend tests"
+        )
+    endif()
+endif()
