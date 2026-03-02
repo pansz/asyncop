@@ -45,6 +45,8 @@
 #include <mutex>
 #include <chrono>
 #include <cstdint>
+#include <sstream>
+#include <iomanip>
 
 namespace ao {
 
@@ -164,6 +166,54 @@ public:
             std::chrono::milliseconds(timestamp_ms)
         );
     }
+    
+    /**
+     * @brief Format timestamp as human-readable string
+     * 
+     * @param id Message ID (or any timestamp in milliseconds)
+     * @return Formatted timestamp "yyyy.mm.dd hh:mm:ss.zzz"
+     * 
+     * @example
+     * formatTimestamp(1709539200000) -> "2024.03.04 12:00:00.000"
+     */
+    static std::string formatTimestamp(int64_t id) {
+        int64_t timestamp_ms = extractTimestamp(id);
+        
+        // Convert to time_t (seconds) and extract milliseconds
+        std::time_t seconds = static_cast<std::time_t>(timestamp_ms / 1000);
+        int milliseconds = static_cast<int>(timestamp_ms % 1000);
+        
+        // Convert to local time
+        std::tm* tm_info = std::localtime(&seconds);
+        
+        // Format the string
+        std::ostringstream oss;
+        oss << std::setfill('0')
+            << (1900 + tm_info->tm_year) << '.'
+            << std::setw(2) << (1 + tm_info->tm_mon) << '.'
+            << std::setw(2) << tm_info->tm_mday << ' '
+            << std::setw(2) << tm_info->tm_hour << ':'
+            << std::setw(2) << tm_info->tm_min << ':'
+            << std::setw(2) << tm_info->tm_sec << '.'
+            << std::setw(3) << milliseconds;
+        
+        return oss.str();
+    }
+    
+    /**
+     * @brief Format message ID as human-readable string
+     * 
+     * @param id Message ID
+     * @return Formatted ID "yyyy.mm.dd hh:mm:ss.zzz [counter]"
+     * 
+     * @example
+     * formatId(id) -> "2024.03.04 12:00:00.000 [1234]"
+     */
+    static std::string formatId(int64_t id) {
+        std::ostringstream oss;
+        oss << formatTimestamp(id) << " [" << extractCounter(id) << "]";
+        return oss.str();
+    }
 };
 
 /**
@@ -180,18 +230,17 @@ template<typename ResponseType>
 class MsgRegistry {
 public:
     using MessageId = int64_t;  // Java-compatible signed long
-    using StatePtr = std::shared_ptr<typename AsyncOp<ResponseType>::State>;
     
     /**
      * @brief Information about a pending message
      */
     struct PendingMessage {
-        StatePtr state;
+        Promise<ResponseType> state;
         std::chrono::steady_clock::time_point created_at;
         std::chrono::milliseconds timeout;
         timer_type timeout_timer;
         PendingMessage() = default;
-        PendingMessage(StatePtr s, std::chrono::milliseconds t)
+        PendingMessage(Promise<ResponseType> s, std::chrono::milliseconds t)
             : state(s)
             , created_at(std::chrono::steady_clock::now())
             , timeout(t)
@@ -264,7 +313,7 @@ public:
      * int64_t id = registry.registerMessage(result.m_promise, std::chrono::seconds(5));
      * sendToNetwork(id, data);
      */
-    MessageId registerMessage(StatePtr state, 
+    MessageId registerMessage(Promise<ResponseType> state, 
                               std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
         MessageId id = id_generator_.generateId();
         registerMessage(id, state, timeout);
@@ -292,7 +341,7 @@ public:
      * sendToNetwork(id, data);
      */
     void registerMessage(MessageId id, 
-                        StatePtr state,
+                        Promise<ResponseType> state,
                         std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
         std::lock_guard<std::mutex> lock(mutex_);
         
@@ -319,16 +368,12 @@ public:
                 return false;  // G_SOURCE_REMOVE
             });
             
-            spdlog::debug("MessageRegistry: Registered message {} (ts={}, seq={}) with {}ms timeout", 
-                         id, 
-                         IdGen::extractTimestamp(id),
-                         IdGen::extractCounter(id),
+            spdlog::debug("MessageRegistry: Registered message {} with {}ms timeout", 
+                         IdGen::formatId(id),
                          timeout.count());
         } else {
-            spdlog::debug("MessageRegistry: Registered message {} (ts={}, seq={}) without timeout",
-                         id,
-                         IdGen::extractTimestamp(id),
-                         IdGen::extractCounter(id));
+            spdlog::debug("MessageRegistry: Registered message {} without timeout",
+                         IdGen::formatId(id));
         }
     }
     
@@ -343,7 +388,7 @@ public:
      * @note Resolves AsyncOp on main thread via invoke_main()
      */
     bool handleResponse(MessageId id, ResponseType response) {
-        StatePtr state;
+        Promise<ResponseType> state;
         timer_type timeout_timer = 0;
         
         {
@@ -384,7 +429,7 @@ public:
      * @note Rejects AsyncOp on main thread via invoke_main()
      */
     bool handleError(MessageId id, ErrorCode error) {
-        StatePtr state;
+        Promise<ResponseType> state;
         timer_type timeout_timer = 0;
         
         {
@@ -425,7 +470,7 @@ public:
      * @note Rejects AsyncOp with ErrorCode::Cancelled
      */
     bool cancelMessage(MessageId id) {
-        StatePtr state;
+        Promise<ResponseType> state;
         timer_type timeout_timer = 0;
         
         {
@@ -543,7 +588,7 @@ private:
      * @param id Message ID that timed out
      */
     void handleTimeout(MessageId id) {
-        StatePtr state;
+        Promise<ResponseType> state;
         
         {
             std::lock_guard<std::mutex> lock(mutex_);

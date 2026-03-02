@@ -1275,6 +1275,41 @@ void testIdGeneration()
     // Test 4: Reconstruction consistency (uses 21 bits for counter, 42 bits for timestamp)
     uint64_t reconstructed = (static_cast<uint64_t>(extractedTimestamp) << 21) | extractedCounter;
     runTest("ID reconstruction", static_cast<int64_t>(reconstructed) == sampleId, true);
+    
+    // Test 5: formatTimestamp() returns correct format
+    std::string formattedTs = ao::IdGen::formatTimestamp(sampleId);
+    std::cout << "    formatTimestamp sample: " << formattedTs << std::endl;
+    runTest("formatTimestamp has correct format (23 chars)", formattedTs.length() == 23, true);
+    runTest("formatTimestamp contains dots", formattedTs.find('.') != std::string::npos, true);
+    runTest("formatTimestamp contains colon", formattedTs.find(':') != std::string::npos, true);
+    runTest("formatTimestamp contains space", formattedTs.find(' ') != std::string::npos, true);
+    
+    // Test 6: formatId() returns correct format
+    std::string formattedId = ao::IdGen::formatId(sampleId);
+    std::cout << "    formatId sample: " << formattedId << std::endl;
+    runTest("formatId contains timestamp format", formattedId.find('.') != std::string::npos, true);
+    runTest("formatId contains counter in brackets", formattedId.find('[') != std::string::npos && formattedId.find(']') != std::string::npos, true);
+    
+    // Test 7: Verify formatId format is "yyyy.mm.dd hh:mm:ss.zzz [counter]"
+    // Expected format example: "2026.03.02 12:00:00.123 [45678]"
+    bool formatValid = formattedId.length() > 25;  // At least timestamp + " [x]"
+    runTest("formatId has reasonable length", formatValid, true);
+    
+    // Test 8: Multiple IDs have increasing counters in same timestamp
+    int64_t id1 = idGen.generateId();
+    int64_t id2 = idGen.generateId();
+    int64_t id3 = idGen.generateId();
+    
+    std::string fmt1 = ao::IdGen::formatId(id1);
+    std::string fmt2 = ao::IdGen::formatId(id2);
+    std::string fmt3 = ao::IdGen::formatId(id3);
+    
+    std::cout << "    formatId sequential test:" << std::endl;
+    std::cout << "      ID1: " << fmt1 << std::endl;
+    std::cout << "      ID2: " << fmt2 << std::endl;
+    std::cout << "      ID3: " << fmt3 << std::endl;
+    
+    runTest("formatId sequential IDs increase", fmt1 < fmt2 && fmt2 < fmt3, true);
 }
 
 void testDelay()
