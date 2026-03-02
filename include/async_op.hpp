@@ -1333,38 +1333,53 @@ AsyncOp<T> retryWithBackoff(F&& operation, int max_attempts,
     
     AsyncOp<T> result;
     auto result_state = result.m_promise;
-    auto attempt = std::make_shared<int>(0);
-    auto delay = std::make_shared<std::chrono::milliseconds>(initial_delay);
     
-    auto tryOnce = std::make_shared<std::function<void()>>();
-    *tryOnce = [=, operation = std::forward<F>(operation)]() mutable {
-        (*attempt)++;
-        spdlog::debug("Retry attempt {}/{}", *attempt, max_attempts);
-        
-        operation()
-            .then([=](T value) {
-                spdlog::info("Retry succeeded on attempt {}/{}", *attempt, max_attempts);
-                result_state->resolveWith(std::move(value));
-            })
-            .onError([=](ErrorCode err) {
-                if (*attempt < max_attempts) {
-                    spdlog::warn("Attempt {}/{} failed, retrying in {}ms", 
-                                *attempt, max_attempts, delay->count());
+    // State struct with attempt logic
+    struct RetryState : std::enable_shared_from_this<RetryState> {
+        int current_attempt = 0;
+        int max_attempts;
+        std::chrono::milliseconds current_delay;
+        F operation;
+        Promise<T> promise;
+
+        RetryState(int max_att, std::chrono::milliseconds init_delay, F&& op, Promise<T> prom)
+            : max_attempts(max_att), current_delay(init_delay), operation(std::forward<F>(op)), promise(prom) {}
+
+        void executeAttempt() {
+            current_attempt++;
+            spdlog::debug("Retry attempt {}/{}", current_attempt, max_attempts);
+            
+            operation()
+                .then([self = this->shared_from_this()](T value) {
+                    spdlog::info("Retry succeeded on attempt {}/{}", 
+                                self->current_attempt, self->max_attempts);
+                    self->promise->resolveWith(std::move(value));
+                })
+                .onError([self = this->shared_from_this()](ErrorCode err) {
+                    if (self->current_attempt >= self->max_attempts) {
+                        spdlog::error("Retry failed after {} attempts", self->max_attempts);
+                        self->promise->rejectWith(ErrorCode::MaxRetriesExceeded);
+                        return;
+                    }
                     
-                    add_timeout(*delay, [tryOnce]() {
-                        (*tryOnce)();
+                    spdlog::warn("Attempt {}/{} failed, retrying in {}ms", 
+                                self->current_attempt, self->max_attempts, 
+                                self->current_delay.count());
+                    
+                    auto delay = self->current_delay;
+                    self->current_delay *= 2;
+                    
+                    add_timeout(delay, [self]() {
+                        self->executeAttempt();  // ✅ Method call, not lambda recursion!
                         return false;
                     });
-                    
-                    *delay *= 2;  // Exponential backoff
-                } else {
-                    spdlog::error("Retry failed after {} attempts", max_attempts);
-                    result_state->rejectWith(ErrorCode::MaxRetriesExceeded);
-                }
-            });
+                });
+        }
     };
     
-    (*tryOnce)();
+    auto state = std::make_shared<RetryState>(max_attempts, initial_delay, std::forward<F>(operation), result_state);
+    
+    state->executeAttempt();
     return result;
 }
 
@@ -1399,87 +1414,105 @@ AsyncOp<T> retry(F&& operation, int max_attempts) {
 template<typename T, typename F>
 AsyncOp<void> forEach(const std::vector<T>& items, F&& process) {
     spdlog::debug("forEach starting with {} items", items.size());
-    
-    auto index = std::make_shared<size_t>(0);
+
     AsyncOp<void> result;
     auto result_state = result.m_promise;
-    
-    auto processNext = std::make_shared<std::function<void()>>();
-    *processNext = [=, &items, process = std::forward<F>(process)]() mutable {
-        if (*index >= items.size()) {
-            spdlog::debug("forEach completed all {} items", items.size());
-            result_state->resolveWith();
-            return;
+
+    struct ForEachState : std::enable_shared_from_this<ForEachState> {
+        size_t index = 0;
+        const std::vector<T>& items;
+        F process;
+        Promise<void> promise;
+
+        ForEachState(const std::vector<T>& it, F&& proc, Promise<void> prom)
+            : items(it), process(std::forward<F>(proc)), promise(prom) {}
+
+        void processNext() {
+            if (index >= items.size()) {
+                spdlog::debug("forEach completed all {} items", items.size());
+                promise->resolveWith();
+                return;
+            }
+
+            spdlog::trace("forEach processing item {}/{}", index + 1, items.size());
+
+            process(items[index])
+                .then([self = this->shared_from_this()](auto) {
+                    self->index++;
+                    self->processNext();
+                })
+                .onError([self = this->shared_from_this()](ErrorCode err) {
+                    spdlog::error("forEach failed at item {}/{} with error {}",
+                                 self->index + 1, self->items.size(), err);
+                    self->promise->rejectWith(err);
+                });
         }
-        
-        spdlog::trace("forEach processing item {}/{}", *index + 1, items.size());
-        
-        process(items[*index])
-            .then([=](auto) {
-                (*index)++;
-                (*processNext)();
-            })
-            .onError([=](ErrorCode err) {
-                spdlog::error("forEach failed at item {}/{} with error {}", 
-                             *index + 1, items.size(), err);
-                result_state->rejectWith(err);
-            });
     };
-    
-    (*processNext)();
+
+    auto state = std::make_shared<ForEachState>(items, std::forward<F>(process), result_state);
+    state->processNext();
     return result;
 }
 
 /**
  * @brief Execute async operation for each item SEQUENTIALLY, collecting failed items
- * 
+ *
  * Unlike forEach() which fails fast on first error, forEachSettled() processes ALL items
  * and returns a list of items that failed. Useful for batch operations where you want to
  * retry failed items later.
- * 
+ *
  * @return AsyncOp<std::vector<T>> containing only the items that failed processing
  */
 template<typename Item, typename F>
 AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& process) {
     spdlog::debug("forEachSettled() starting with {} items", items.size());
-    
-    auto index = std::make_shared<size_t>(0);
-    auto failed_items = std::make_shared<std::vector<Item>>();
+
     AsyncOp<std::vector<Item>> result;
     auto result_state = result.m_promise;
-    
+
     if (items.empty()) {
         spdlog::debug("forEachSettled() called with 0 items");
         return AsyncOp<std::vector<Item>>::resolved(std::vector<Item>{});
     }
-    
-    auto processNext = std::make_shared<std::function<void()>>();
-    *processNext = [=, &items, process = std::forward<F>(process)]() mutable {
-        if (*index >= items.size()) {
-            spdlog::debug("forEachSettled() completed all {} items, {} failed", 
-                         items.size(), failed_items->size());
-            result_state->resolveWith(std::move(*failed_items));
-            return;
+
+    struct ForEachSettledState : std::enable_shared_from_this<ForEachSettledState> {
+        size_t index = 0;
+        const std::vector<Item>& items;
+        F process;
+        Promise<std::vector<Item>> promise;
+        std::vector<Item> failed_items;
+
+        ForEachSettledState(const std::vector<Item>& it, F&& proc, Promise<std::vector<Item>> prom)
+            : items(it), process(std::forward<F>(proc)), promise(prom) {}
+
+        void processNext() {
+            if (index >= items.size()) {
+                spdlog::debug("forEachSettled() completed all {} items, {} failed",
+                             items.size(), failed_items.size());
+                promise->resolveWith(std::move(failed_items));
+                return;
+            }
+
+            size_t current = index;
+            spdlog::trace("forEachSettled() processing item {}/{}", current + 1, items.size());
+
+            process(items[current])
+                .then([self = this->shared_from_this()](auto) {
+                    self->index++;
+                    self->processNext();
+                })
+                .onError([self = this->shared_from_this(), current](ErrorCode err) {
+                    spdlog::debug("forEachSettled() item {}/{} failed with error {}",
+                                 current + 1, self->items.size(), err);
+                    self->failed_items.push_back(self->items[current]);
+                    self->index++;
+                    self->processNext();
+                });
         }
-        
-        size_t current = *index;
-        spdlog::trace("forEachSettled() processing item {}/{}", current + 1, items.size());
-        
-        process(items[current])
-            .then([=](auto) {
-                (*index)++;
-                (*processNext)();
-            })
-            .onError([=, &items](ErrorCode err) {
-                spdlog::debug("forEachSettled() item {}/{} failed with error {}", 
-                             current + 1, items.size(), err);
-                failed_items->push_back(items[current]);
-                (*index)++;
-                (*processNext)();
-            });
     };
-    
-    (*processNext)();
+
+    auto state = std::make_shared<ForEachSettledState>(items, std::forward<F>(process), result_state);
+    state->processNext();
     return result;
 }
 
@@ -1501,114 +1534,138 @@ struct SettledResult {
 
 /**
  * @brief Transform each item SEQUENTIALLY, collecting all settled results
- * 
+ *
  * Unlike map() which fails fast on first error, mapSettled() processes ALL items
  * and returns results for both successes and failures. Useful for batch transformations
  * where you want full visibility into what succeeded and what failed.
- * 
+ *
  * @return AsyncOp<std::vector<SettledResult<T>>> where T is the unwrapped result type of transform()
  */
 template<typename Item, typename F>
 auto mapSettled(const std::vector<Item>& items, F&& transform)
     -> AsyncOp<std::vector<SettledResult<unwrap_async_op_t<typename std::invoke_result<F, Item>::type>>>> {
-    
+
     using InvokeResult = typename std::invoke_result<F, Item>::type;
     using RetType = unwrap_async_op_t<InvokeResult>;
-    
+
     spdlog::debug("mapSettled() starting with {} items", items.size());
-    
-    auto index = std::make_shared<size_t>(0);
-    auto results = std::make_shared<std::vector<SettledResult<RetType>>>();
+
     AsyncOp<std::vector<SettledResult<RetType>>> result;
     auto result_state = result.m_promise;
-    
+
     if (items.empty()) {
         spdlog::debug("mapSettled() called with 0 items");
         return AsyncOp<std::vector<SettledResult<RetType>>>::resolved(std::vector<SettledResult<RetType>>{});
     }
-    
-    results->resize(items.size());
-    
-    auto processNext = std::make_shared<std::function<void()>>();
-    *processNext = [=, &items, transform = std::forward<F>(transform)]() mutable {
-        if (*index >= items.size()) {
-            spdlog::debug("mapSettled() completed all {} items", items.size());
-            result_state->resolveWith(std::move(*results));
-            return;
+
+    struct MapSettledState : std::enable_shared_from_this<MapSettledState> {
+        size_t index = 0;
+        const std::vector<Item>& items;
+        F transform;
+        Promise<std::vector<SettledResult<RetType>>> promise;
+        std::vector<SettledResult<RetType>> results;
+
+        MapSettledState(const std::vector<Item>& it, F&& trans, Promise<std::vector<SettledResult<RetType>>> prom)
+            : items(it), transform(std::forward<F>(trans)), promise(prom) {
+            results.resize(items.size());
         }
-        
-        size_t current = *index;
-        spdlog::trace("mapSettled() processing item {}/{}", current + 1, items.size());
-        
-        transform(items[current])
-            .then([=](RetType value) {
-                (*results)[current].status = SettledResult<RetType>::Fulfilled;
-                (*results)[current].value = std::move(value);
-                (*index)++;
-                (*processNext)();
-            })
-            .onError([=](ErrorCode err) {
-                spdlog::debug("mapSettled() item {}/{} failed with error {}", 
-                             current + 1, items.size(), err);
-                (*results)[current].status = SettledResult<RetType>::Rejected;
-                (*results)[current].error = err;
-                (*index)++;
-                (*processNext)();
-            });
+
+        void processNext() {
+            if (index >= items.size()) {
+                spdlog::debug("mapSettled() completed all {} items", items.size());
+                promise->resolveWith(std::move(results));
+                return;
+            }
+
+            size_t current = index;
+            spdlog::trace("mapSettled() processing item {}/{}", current + 1, items.size());
+
+            transform(items[current])
+                .then([self = this->shared_from_this(), current](RetType value) {
+                    self->results[current].status = SettledResult<RetType>::Fulfilled;
+                    self->results[current].value = std::move(value);
+                    self->index++;
+                    self->processNext();
+                })
+                .onError([self = this->shared_from_this(), current](ErrorCode err) {
+                    spdlog::debug("mapSettled() item {}/{} failed with error {}",
+                                 current + 1, self->items.size(), err);
+                    self->results[current].status = SettledResult<RetType>::Rejected;
+                    self->results[current].error = err;
+                    self->index++;
+                    self->processNext();
+                });
+        }
     };
-    
-    (*processNext)();
+
+    auto state = std::make_shared<MapSettledState>(items, std::forward<F>(transform), result_state);
+    state->processNext();
     return result;
 }
 
 /**
  * @brief Poll operation until condition met or max attempts reached
- * 
+ *
  * Executes operation repeatedly at intervals until condition(result) returns true.
  * Rejects with MaxRetriesExceeded if max_attempts reached.
  */
 template<typename T, typename F, typename Pred>
 AsyncOp<T> pollUntil(F&& operation, Pred&& condition, int max_attempts,
                      std::chrono::milliseconds interval) {
-    spdlog::debug("pollUntil: max_attempts={}, interval={}ms", 
+    spdlog::debug("pollUntil: max_attempts={}, interval={}ms",
                  max_attempts, interval.count());
-    
+
     AsyncOp<T> result;
     auto result_state = result.m_promise;
-    auto attempt = std::make_shared<int>(0);
-    
-    auto poll = std::make_shared<std::function<void()>>();
-    *poll = [=, operation = std::forward<F>(operation), condition = std::forward<Pred>(condition)]() mutable {
-        (*attempt)++;
-        spdlog::trace("pollUntil attempt {}/{}", *attempt, max_attempts);
-        
-        operation()
-            .then([=](T value) {
-                if (condition(value)) {
-                    spdlog::info("pollUntil condition met on attempt {}/{}", 
-                                *attempt, max_attempts);
-                    result_state->resolveWith(std::move(value));
-                } else if (*attempt < max_attempts) {
-                    spdlog::debug("pollUntil condition not met, next poll in {}ms", 
-                                 interval.count());
-                    
-                    add_timeout(interval, [poll]() {
-                        (*poll)();
-                        return false;
-                    });
-                } else {
-                    spdlog::error("pollUntil max attempts {} reached", max_attempts);
-                    result_state->rejectWith(ErrorCode::MaxRetriesExceeded);
-                }
-            })
-            .onError([=](ErrorCode err) {
-                spdlog::error("pollUntil failed on attempt {}/{} with error {}", 
-                             *attempt, max_attempts, err);
-                result_state->rejectWith(err);
-            });
+
+    struct PollUntilState : std::enable_shared_from_this<PollUntilState> {
+        int attempt = 0;
+        int max_attempts;
+        std::chrono::milliseconds interval;
+        F operation;
+        Pred condition;
+        Promise<T> promise;
+
+        PollUntilState(int max_att, std::chrono::milliseconds intv, F&& op, Pred&& cond, Promise<T> prom)
+            : max_attempts(max_att), interval(intv), operation(std::forward<F>(op)),
+              condition(std::forward<Pred>(cond)), promise(prom) {}
+
+        void poll() {
+            attempt++;
+            spdlog::trace("pollUntil attempt {}/{}", attempt, max_attempts);
+
+            operation()
+                .then([self = this->shared_from_this()](T value) {
+                    if (self->condition(value)) {
+                        spdlog::info("pollUntil condition met on attempt {}/{}",
+                                    self->attempt, self->max_attempts);
+                        self->promise->resolveWith(std::move(value));
+                    } else if (self->attempt < self->max_attempts) {
+                        spdlog::debug("pollUntil condition not met, next poll in {}ms",
+                                     self->interval.count());
+
+                        add_timeout(self->interval, [self]() {
+                            self->poll();
+                            return false;
+                        });
+                    } else {
+                        spdlog::error("pollUntil max attempts {} reached", self->max_attempts);
+                        self->promise->rejectWith(ErrorCode::MaxRetriesExceeded);
+                    }
+                })
+                .onError([self = this->shared_from_this()](ErrorCode err) {
+                    spdlog::error("pollUntil failed on attempt {}/{} with error {}",
+                                 self->attempt, self->max_attempts, err);
+                    self->promise->rejectWith(err);
+                });
+        }
     };
-    
-    (*poll)();
+
+    auto state = std::make_shared<PollUntilState>(max_attempts, interval,
+                                                   std::forward<F>(operation),
+                                                   std::forward<Pred>(condition),
+                                                   result_state);
+    state->poll();
     return result;
 }
 
@@ -1864,47 +1921,58 @@ AsyncOp<std::vector<SettledResult<T>>> allSettled(std::vector<AsyncOp<T>> operat
 
 /**
  * @brief Transform each item sequentially, collecting results
- * 
+ *
  * Processes items one at a time. Fails on first error (remaining items NOT processed).
  * For parallel processing, use mapParallel().
  */
 template<typename T, typename F>
-auto map(const std::vector<T>& items, F&& transform) 
+auto map(const std::vector<T>& items, F&& transform)
     -> AsyncOp<std::vector<unwrap_async_op_t<typename std::invoke_result<F, T>::type>>> {
-    
+
     using InvokeResult = typename std::invoke_result<F, T>::type;
     using RetType = unwrap_async_op_t<InvokeResult>;
-    
+
     spdlog::debug("map() starting with {} items", items.size());
-    
-    auto index = std::make_shared<size_t>(0);
-    auto results = std::make_shared<std::vector<RetType>>();
+
     AsyncOp<std::vector<RetType>> result;
     auto result_state = result.m_promise;
-    
-    auto processNext = std::make_shared<std::function<void()>>();
-    *processNext = [=, &items, transform = std::forward<F>(transform)]() mutable {
-        if (*index >= items.size()) {
-            spdlog::debug("map() completed all {} items", items.size());
-            result_state->resolveWith(std::move(*results));
-            return;
+
+    struct MapState : std::enable_shared_from_this<MapState> {
+        size_t index = 0;
+        const std::vector<T>& items;
+        F transform;
+        Promise<std::vector<RetType>> promise;
+        std::vector<RetType> results;
+
+        MapState(const std::vector<T>& it, F&& trans, Promise<std::vector<RetType>> prom)
+            : items(it), transform(std::forward<F>(trans)), promise(prom) {
+            results.reserve(items.size());
         }
-        
-        spdlog::trace("map() processing item {}/{}", *index + 1, items.size());
-        
-        transform(items[*index])
-            .then([=](RetType value) {
-                results->push_back(std::move(value));
-                (*index)++;
-                (*processNext)();
-            })
-            .onError([=](ErrorCode err) {
-                spdlog::error("map() failed at item {}/{}", *index + 1, items.size());
-                result_state->rejectWith(err);
-            });
+
+        void processNext() {
+            if (index >= items.size()) {
+                spdlog::debug("map() completed all {} items", items.size());
+                promise->resolveWith(std::move(results));
+                return;
+            }
+
+            spdlog::trace("map() processing item {}/{}", index + 1, items.size());
+
+            transform(items[index])
+                .then([self = this->shared_from_this()](RetType value) {
+                    self->results.push_back(std::move(value));
+                    self->index++;
+                    self->processNext();
+                })
+                .onError([self = this->shared_from_this()](ErrorCode err) {
+                    spdlog::error("map() failed at item {}/{}", self->index + 1, self->items.size());
+                    self->promise->rejectWith(err);
+                });
+        }
     };
-    
-    (*processNext)();
+
+    auto state = std::make_shared<MapState>(items, std::forward<F>(transform), result_state);
+    state->processNext();
     return result;
 }
 
