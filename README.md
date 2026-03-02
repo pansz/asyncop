@@ -514,16 +514,17 @@ Special thanks to all contributors and users who have helped shape this library.
 
 ## Version
 
-**Current Version:** 2.4.1  
-**Release Date:** 2026-02-28  
+**Current Version:** 2.4.1
+**Release Date:** 2026-02-28
 **Author:** pansz
 
 **Changelog:**
-- v2.4.1: Added `filterSuccess()`, `filterError()`, improved documentation
-- v2.4.0: Added `filter()`, `cancel()` methods
-- v2.3.0: Added collection operations (`all()`, `any()`, `map()`, etc.)
-- v2.2.0: Added `timeout()`, `tap()`, `finally()`
-- v2.1.0: Initial public release
+- v2.4.1: Added `filterSuccess()`, `filterError()`, fixed `next()` nullptr handling
+- v2.4.0: Added `filter()`, `cancel()` methods; deprecated `orElse()`, `recoverFrom()`
+- v2.3.2: Added debug assert for callback overwrite violations
+- v2.3.1: Fixed race conditions in parallel batch operations
+- v2.3.0: Added `onSuccess()`, improved callback protection
+- v2.2.0: Initial release with `timeout()`, `tap()`, `finally()`, collection ops
 
 ---
 

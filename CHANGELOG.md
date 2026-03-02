@@ -1,5 +1,14 @@
 # Changelog
 
+All notable changes to AsyncOp will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+**Latest:** [2.4.1](#241---2026-02-27) - See [README.md](README.md#version) for brief summary.
+
+---
+
 ## [2.4.1] - 2026-02-27
 
 ### Added
