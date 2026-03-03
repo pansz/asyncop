@@ -1,8 +1,10 @@
 /**
- * @file message_registry.hpp
- * @brief Message-based AsyncOp integration with timestamp-based ID generation
+ * @file msg_registry.hpp
+ * @brief Message-based AsyncOp integration - Lightweight Asynchronous Operation Chaining for C++17
  * @author pansz
  * @date 2026.2.6
+ * 
+ * AsyncOp - Elegant Promise/Future pattern bringing modern async programming to C++17 with minimal overhead
  * 
  * Provides MessageRegistry for tracking async operations by message ID.
  * Uses timestamp-based ID generation for uniqueness across restarts.

@@ -1,10 +1,10 @@
 /**
  * @file async_op.hpp
- * @brief Lightweight asynchronous operation chaining for embedded Linux
+ * @brief Lightweight Asynchronous Operation Chaining for C++17
  * @author pansz
  * @date 2026.2.8
  *
- * AsyncOp 2.4.1
+ * AsyncOp - Elegant Promise/Future pattern bringing modern async programming to C++17 with minimal overhead
  *
  * Promise/Future-like pattern for chaining async I/O operations. Eliminates callback hell
  * and improves code readability. Designed for embedded systems with moderate memory constraints.

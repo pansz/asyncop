@@ -1,3 +1,15 @@
+/**
+ * @file async_op_void.hpp
+ * @brief AsyncOp<void> specialization - Lightweight Asynchronous Operation Chaining for C++17
+ * @author pansz
+ * @date 2026.2.8
+ *
+ * AsyncOp - Elegant Promise/Future pattern bringing modern async programming to C++17 with minimal overhead
+ *
+ * Specialization of AsyncOp for void return type (operations without return values).
+ * See async_op.hpp for main documentation.
+ */
+
 #ifndef ASYNC_OP_VOID_HPP
 #define ASYNC_OP_VOID_HPP
 
