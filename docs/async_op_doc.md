@@ -1,8 +1,6 @@
-# AsyncOp Library v2.4.1 - Complete Documentation
+# AsyncOp - Lightweight Asynchronous Operation Chaining for C++17
 
-> **Modern Promise/Future pattern for embedded Linux**
-> 
-> Chainable asynchronous operations with comprehensive error handling, designed for embedded systems with GLib or Qt event loops.
+> Elegant Promise/Future pattern bringing modern async programming to C++17 with minimal overhead
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
@@ -1735,12 +1733,9 @@ MIT License - See LICENSE file for details
 
 ---
 
-## Support & Contributing
+## Support
 
-- **Issues:** Report bugs or request features on GitHub
-- **Documentation:** This guide covers v2.4.1
-- **Examples:** See `examples/` directory for more patterns
-
-**Version:** 2.4.1  
-**Last Updated:** 2026-02-28  
-**Author:** pansz
+- 📖 **Documentation**: [docs/async_op_doc.md](docs/async_op_doc.md)
+- 🐛 **Issues**: [GitHub Issues](https://github.com/pansz/asyncop/issues)
+- 💬 **Discussions**: [GitHub Discussions](https://github.com/pansz/asyncop/discussions)
+- ✉️ **Email**: pan.sz@outlook.com
