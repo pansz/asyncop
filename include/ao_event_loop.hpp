@@ -1,8 +1,10 @@
 /**
- * @file event_loop.hpp
- * @brief Event loop abstraction layer for AsyncOp
+ * @file ao_event_loop.hpp
+ * @brief Event loop abstraction layer - Lightweight Asynchronous Operation Chaining for C++17
  * @author pansz
  * @date 2026.2.8
+ * 
+ * AsyncOp - Elegant Promise/Future pattern bringing modern async programming to C++17 with minimal overhead
  * 
  * Provides unified interface for different event loop backends (GLib, Qt, etc.)
  * Allows AsyncOp to be backend-agnostic and easily extensible to new event loops.
