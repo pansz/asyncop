@@ -350,16 +350,16 @@ public:
         // Check for duplicate ID (should not happen with proper usage)
         auto it = pending_.find(id);
         if (it != pending_.end()) {
-            spdlog::error("MessageRegistry: Attempt to register duplicate message ID {}", id);
-            throw std::runtime_error("Duplicate message ID: " + std::to_string(id));
+            spdlog::error("MessageRegistry: Attempt to register duplicate message ID {}", IdGen::formatId(id));
+            throw std::runtime_error("Duplicate message ID: " + IdGen::formatId(id));
         }
         
         // auto& pending = pending_[id];
         // pending = PendingMessage(state, timeout);
         auto [item, inserted] = pending_.try_emplace(id, state, timeout);
         if (!inserted) {
-            spdlog::error("MessageRegistry: Failed to insert message ID {}", id);
-            throw std::runtime_error("Failed to insert message ID: " + std::to_string(id));
+            spdlog::error("MessageRegistry: Failed to insert message ID {}", IdGen::formatId(id));
+            throw std::runtime_error("Failed to insert message ID: " + IdGen::formatId(id));
         }
         auto& pending = item->second;
         
@@ -397,7 +397,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = pending_.find(id);
             if (it == pending_.end()) {
-                spdlog::warn("MessageRegistry: Received response for unknown message {}", id);
+                spdlog::warn("MessageRegistry: Received response for unknown message {}", IdGen::formatId(id));
                 return false;
             }
             
@@ -416,7 +416,7 @@ public:
             state->resolveWith(std::move(response));
         });
         
-        spdlog::debug("MessageRegistry: Handled response for message {}", id);
+        spdlog::debug("MessageRegistry: Handled response for message {}", IdGen::formatId(id));
         return true;
     }
     
@@ -438,7 +438,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = pending_.find(id);
             if (it == pending_.end()) {
-                spdlog::warn("MessageRegistry: Received error for unknown message {}", id);
+                spdlog::warn("MessageRegistry: Received error for unknown message {}", IdGen::formatId(id));
                 return false;
             }
             
@@ -457,8 +457,8 @@ public:
             state->rejectWith(error);
         });
         
-        spdlog::debug("MessageRegistry: Handled error for message {} with code {}", 
-                     id, static_cast<int>(error));
+        spdlog::debug("MessageRegistry: Handled error for message {} with code {}",
+                     IdGen::formatId(id), static_cast<int>(error));
         return true;
     }
     
@@ -497,7 +497,7 @@ public:
             state->rejectWith(ErrorCode::Cancelled);
         });
         
-        spdlog::debug("MessageRegistry: Cancelled message {}", id);
+        spdlog::debug("MessageRegistry: Cancelled message {}", IdGen::formatId(id));
         return true;
     }
     
@@ -609,7 +609,7 @@ private:
             state->rejectWith(ErrorCode::Timeout);
         });
         
-        spdlog::warn("MessageRegistry: Message {} timed out", id);
+        spdlog::warn("MessageRegistry: Message {} timed out", IdGen::formatId(id));
     }
 };
 

@@ -119,7 +119,7 @@ private:
         if (handler) {
             handler(response);
         } else {
-            spdlog::warn("No handler found for response ID: {}", response.id);
+            spdlog::warn("No handler found for response ID: {}", ao::IdGen::formatId(response.id));
         }
     }
 };
