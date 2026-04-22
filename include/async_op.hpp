@@ -82,6 +82,75 @@ inline const char* error_code_name(ErrorCode ec) {
         default:                           return "Unknown";
     }
 }
+
+/**
+ * @brief Shared base class for AsyncOp State structures
+ *
+ * Contains common status management, error code handling, and ID tracking.
+ * Used by both AsyncOp<T>::State and AsyncOp<void>::State to reduce code duplication.
+ */
+class AsyncOpStateBase {
+public:
+    enum Status { Pending, Resolved, Rejected };
+
+    struct StatusFlags {
+        unsigned int status : 2;
+        unsigned int error_code : 4;
+        unsigned int success_cb_is_propagating : 1;
+        unsigned int error_cb_is_propagating : 1;
+        unsigned int reserved : 24;
+    };
+
+    id_type op_id;
+    StatusFlags status_flags;
+
+    AsyncOpStateBase() : op_id(detail::get_next_async_op_id()) {
+        status_flags.status = Pending;
+        status_flags.error_code = static_cast<unsigned int>(ErrorCode::None);
+        status_flags.success_cb_is_propagating = 0;
+        status_flags.error_cb_is_propagating = 0;
+        status_flags.reserved = 0;
+        spdlog::trace("AsyncOp[{}] state created", op_id);
+    }
+
+    ~AsyncOpStateBase() {
+        spdlog::trace("AsyncOp[{}] state destroyed", op_id);
+    }
+
+    bool isPending() const { return status_flags.status == Pending; }
+    bool isResolved() const { return status_flags.status == Resolved; }
+    bool isRejected() const { return status_flags.status == Rejected; }
+    bool isSettled() const { return status_flags.status != Pending; }
+
+    ErrorCode getErrorCode() const {
+        return static_cast<ErrorCode>(status_flags.error_code);
+    }
+
+    void setErrorCode(ErrorCode code) {
+        status_flags.error_code = static_cast<unsigned int>(code);
+    }
+
+    void setStatus(Status new_status) {
+        status_flags.status = new_status;
+    }
+
+    bool isSuccessCallbackPropagating() const {
+        return status_flags.success_cb_is_propagating;
+    }
+
+    bool isErrorCallbackPropagating() const {
+        return status_flags.error_cb_is_propagating;
+    }
+
+    void setSuccessCallbackPropagating(bool value) {
+        status_flags.success_cb_is_propagating = value ? 1 : 0;
+    }
+
+    void setErrorCallbackPropagating(bool value) {
+        status_flags.error_cb_is_propagating = value ? 1 : 0;
+    }
+};
+
 } // namespace ao
 
 // fmt/spdlog formatter for ErrorCode - enables automatic formatting
@@ -135,6 +204,75 @@ inline constexpr bool dependent_false_v = false;
 template<typename T>
 using Promise = std::shared_ptr<typename AsyncOp<T>::State>;
 
+namespace detail {
+
+/**
+ * @brief Execute callback with exception protection (propagate errors)
+ * 
+ * Catches exceptions and invokes error handler with ErrorCode::Exception.
+ */
+template<typename F, typename ErrorHandler>
+inline void executeProtected(F&& callback, id_type op_id, const char* context, ErrorHandler on_error) {
+    try {
+        callback();
+    } catch (const std::exception &e) {
+        spdlog::error("AsyncOp[{}] exception in {}: {}", op_id, context, e.what());
+        on_error(ErrorCode::Exception);
+    } catch (...) {
+        spdlog::error("AsyncOp[{}] unknown exception in {}", op_id, context);
+        on_error(ErrorCode::Exception);
+    }
+}
+
+/**
+ * @brief Execute callback with ErrorCode re-throw support
+ * 
+ * Special version for error handlers that may re-throw ErrorCode.
+ */
+template<typename F, typename ErrorHandler>
+inline void executeProtectedWithErrorCode(F&& callback, id_type op_id, const char* context, ErrorHandler on_error) {
+    try {
+        callback();
+    } catch (const ErrorCode &e) {
+        spdlog::debug("AsyncOp[{}] {} re-threw error {}", op_id, context, e);
+        on_error(e);
+    } catch (const std::exception &e) {
+        spdlog::error("AsyncOp[{}] exception in {}: {}", op_id, context, e.what());
+        on_error(ErrorCode::Exception);
+    } catch (...) {
+        spdlog::error("AsyncOp[{}] unknown exception in {}", op_id, context);
+        on_error(ErrorCode::Exception);
+    }
+}
+
+/**
+ * @brief Execute callback with exception suppression
+ * 
+ * Catches exceptions and logs them, but doesn't propagate.
+ * 
+ * @param log_as_error If true, use error level; otherwise warn level
+ */
+template<typename F>
+inline void executeProtectedSuppress(F&& callback, const char* context, bool log_as_error = false) {
+    try {
+        callback();
+    } catch (const std::exception &e) {
+        if (log_as_error) {
+            spdlog::error("Exception in {}: {}", context, e.what());
+        } else {
+            spdlog::warn("Exception in {}: {}", context, e.what());
+        }
+    } catch (...) {
+        if (log_as_error) {
+            spdlog::error("Unknown exception in {}", context);
+        } else {
+            spdlog::warn("Unknown exception in {}", context);
+        }
+    }
+}
+
+} // namespace detail
+
 /**
  * @brief Asynchronous operation with Promise/Future semantics
  * 
@@ -176,61 +314,32 @@ public:
      * Multiple AsyncOp instances can reference same State.
      * Provides idempotent helper methods: isPending(), resolveWith(), rejectWith()
      */
-    struct State {
-        enum Status { Pending, Resolved, Rejected };
-
-        // Combined status and flags to reduce memory footprint
-        struct StatusFlags {
-            unsigned int status : 2;                    // 2 bits: Pending/Resolved/Rejected
-            unsigned int error_code : 4;                // 4 bits: ErrorCode enum (static_assert enforces < 16 values)
-            unsigned int success_cb_is_propagating : 1; // 1 bit: flag for success callback
-            unsigned int error_cb_is_propagating : 1;   // 1 bit: flag for error callback
-            unsigned int reserved : 24;                 // 24 bits: reserved for future use
-        };
-
-        // Optimized member ordering for memory layout (largest to smallest)
-        std::function<void(T)> success_cb;       // std::function is typically quite large
-        std::function<void(ErrorCode)> error_cb; // std::function is typically quite large
-        T result_value;                          // Largest: could be std::string, nlohmann::json, etc.
-        id_type op_id;                           // Usually size_t or similar
-        StatusFlags status_flags;                // Combined status, error code and flags in 1 byte
+    struct State : AsyncOpStateBase {
+        std::function<void(T)> success_cb;
+        std::function<void(ErrorCode)> error_cb;
+        T result_value;
         
-        State() : op_id(detail::get_next_async_op_id()) {
-            status_flags.status = Pending;
-            status_flags.error_code = static_cast<unsigned int>(ErrorCode::None);
-            status_flags.success_cb_is_propagating = 0;
-            status_flags.error_cb_is_propagating = 0;
-            status_flags.reserved = 0;
-            spdlog::trace("AsyncOp[{}] state created", op_id);
-        }
-
-        ~State() {
-            spdlog::trace("AsyncOp[{}] state destroyed", op_id);
-        }
-
-        bool isPending() const { return status_flags.status == Pending; }
-        bool isResolved() const { return status_flags.status == Resolved; }
-        bool isRejected() const { return status_flags.status == Rejected; }
-        bool isSettled() const { return status_flags.status != Pending; }
-        
-        ErrorCode getErrorCode() const { 
-            return static_cast<ErrorCode>(status_flags.error_code); 
-        }
-        
-        void setErrorCode(ErrorCode code) {
-            status_flags.error_code = static_cast<unsigned int>(code);
-        }
-        
-        void setStatus(Status new_status) {
-            status_flags.status = new_status;
-        }
+        State() : AsyncOpStateBase() {}
 
         bool canOverwriteSuccessCallback() const {
-            return !success_cb || status_flags.success_cb_is_propagating;
+            return !success_cb || isSuccessCallbackPropagating();
         }
 
         bool canOverwriteErrorCallback() const {
-            return !error_cb || status_flags.error_cb_is_propagating;
+            return !error_cb || isErrorCallbackPropagating();
+        }
+
+        void executeIfSettled(std::shared_ptr<State> self) {
+            if (!isPending()) {
+                add_idle([self]() {
+                    if (self->isResolved() && self->success_cb) {
+                        self->success_cb(std::move(self->result_value));
+                    } else if (self->isRejected() && self->error_cb) {
+                        self->error_cb(self->getErrorCode());
+                    }
+                    return false;
+                });
+            }
         }
 
         // Idempotent: does nothing if already settled
@@ -323,9 +432,8 @@ public:
             m_promise->success_cb = [f = std::forward<F>(f), next_state,
                                      op_id = m_promise->op_id](T val) mutable {
                 spdlog::debug("AsyncOp[{}] executing then() callback", op_id);
-                try {
+                detail::executeProtected([&]() {
                     if constexpr (is_async_op_v<InvokeResult>) {
-                        // f returns AsyncOp - chain it
                         auto future_result = f(std::move(val));
                         future_result
                             .then([next_state](auto v) mutable {
@@ -337,7 +445,6 @@ public:
                             })
                             .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
                     } else {
-                        // f returns plain value or void
                         if constexpr (std::is_void_v<RetType>) {
                             f(std::move(val));
                             next_state->resolveWith();
@@ -346,13 +453,7 @@ public:
                             next_state->resolveWith(std::move(result));
                         }
                     }
-                } catch (const std::exception &e) {
-                    spdlog::error("AsyncOp[{}] exception in then(): {}", op_id, e.what());
-                    next_state->rejectWith(ErrorCode::Exception);
-                } catch (...) {
-                    spdlog::error("AsyncOp[{}] unknown exception in then()", op_id);
-                    next_state->rejectWith(ErrorCode::Exception);
-                }
+                }, op_id, "then()", [next_state](ErrorCode e) { next_state->rejectWith(e); });
             };
         }
 
@@ -366,17 +467,7 @@ public:
             };
         }
 
-        // If already settled, execute via micro-async (add_idle)
-        if (!isPending()) {
-            add_idle([state = m_promise]() {
-                if (state->isResolved() && state->success_cb) {
-                    state->success_cb(std::move(state->result_value));
-                } else if (state->isRejected() && state->error_cb) {
-                    state->error_cb(state->getErrorCode());
-                }
-                return false;
-            });
-        }
+        m_promise->executeIfSettled(m_promise);
 
         return next_op;
     }
@@ -513,28 +604,17 @@ public:
 
             m_promise->error_cb = [f = std::forward<F>(f), next_state, op_id](ErrorCode err) mutable {
                 spdlog::debug("AsyncOp[{}] executing recover() recovery", op_id);
-                try {
+                detail::executeProtectedWithErrorCode([&]() {
                     if constexpr (is_async_op_v<InvokeResult>) {
-                        // Handler returns AsyncOp<T> - chain recovery operation
                         auto recovery_op = f(err);
                         recovery_op
                             .then([next_state](T value) mutable { next_state->resolveWith(std::move(value)); })
                             .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
                     } else {
-                        // Handler returns T - recovery succeeded
                         T recovery_value = f(err);
                         next_state->resolveWith(std::move(recovery_value));
                     }
-                } catch (const ErrorCode &e) {
-                    spdlog::debug("AsyncOp[{}] recover() re-threw error {}", op_id, e);
-                    next_state->rejectWith(e);
-                } catch (const std::exception &e) {
-                    spdlog::error("AsyncOp[{}] exception in recover(): {}", op_id, e.what());
-                    next_state->rejectWith(ErrorCode::Exception);
-                } catch (...) {
-                    spdlog::error("AsyncOp[{}] unknown exception in recover()", op_id);
-                    next_state->rejectWith(ErrorCode::Exception);
-                }
+                }, op_id, "recover()", [next_state](ErrorCode e) { next_state->rejectWith(e); });
             };
         }
 
@@ -551,17 +631,7 @@ public:
         // If canOverwriteSuccessCallback() returns false, it's not a problem since this
         // is just the default propagating callback and an existing terminal handler is already set.
         
-        // If already settled, execute immediately
-        if (!isPending()) {
-            add_idle([state = m_promise]() {
-                if (state->isResolved() && state->success_cb) {
-                    state->success_cb(std::move(state->result_value));
-                } else if (state->isRejected() && state->error_cb) {
-                    state->error_cb(state->getErrorCode());
-                }
-                return false;
-            });
-        }
+        m_promise->executeIfSettled(m_promise);
         
         return next_op;
     }
@@ -670,9 +740,8 @@ public:
             m_promise->success_cb = [success_handler = std::forward<SuccessF>(success_handler), next_state,
                                      op_id](T val) mutable {
                 spdlog::debug("AsyncOp[{}] executing next() success handler", op_id);
-                try {
+                detail::executeProtected([&]() {
                     if constexpr (is_async_op_v<SuccessInvokeResult>) {
-                        // Handler returns AsyncOp<RetType>
                         auto result_op = success_handler(std::move(val));
                         result_op
                             .then([next_state](RetType value) mutable {
@@ -680,17 +749,10 @@ public:
                             })
                             .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
                     } else {
-                        // Handler returns RetType
                         RetType result = success_handler(std::move(val));
                         next_state->resolveWith(std::move(result));
                     }
-                } catch (const std::exception &e) {
-                    spdlog::error("AsyncOp[{}] exception in next() success handler: {}", op_id, e.what());
-                    next_state->rejectWith(ErrorCode::Exception);
-                } catch (...) {
-                    spdlog::error("AsyncOp[{}] unknown exception in next() success handler", op_id);
-                    next_state->rejectWith(ErrorCode::Exception);
-                }
+                }, op_id, "next() success handler", [next_state](ErrorCode e) { next_state->rejectWith(e); });
             };
         }
 
@@ -703,44 +765,22 @@ public:
             m_promise->error_cb = [error_handler = std::forward<ErrorF>(error_handler), next_state,
                                 op_id](ErrorCode err) mutable {
                 spdlog::debug("AsyncOp[{}] executing next() error handler", op_id);
-                try {
+                detail::executeProtectedWithErrorCode([&]() {
                     if constexpr (is_async_op_v<ErrorInvokeResult>) {
-                        // Handler returns AsyncOp<RetType>
                         auto result_op = error_handler(err);
                         result_op
                             .then([next_state](RetType value) mutable {
                                 next_state->resolveWith(std::move(value)); })
                             .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
                     } else {
-                        // Handler returns RetType
                         RetType result = error_handler(err);
                         next_state->resolveWith(std::move(result));
                     }
-                } catch (const ErrorCode &e) {
-                    // Re-thrown ErrorCode
-                    spdlog::debug("AsyncOp[{}] next() error handler re-threw error {}", op_id, e);
-                    next_state->rejectWith(e);
-                } catch (const std::exception &e) {
-                    spdlog::error("AsyncOp[{}] exception in next() error handler: {}", op_id, e.what());
-                    next_state->rejectWith(ErrorCode::Exception);
-                } catch (...) {
-                    spdlog::error("AsyncOp[{}] unknown exception in next() error handler", op_id);
-                    next_state->rejectWith(ErrorCode::Exception);
-                }
+                }, op_id, "next() error handler", [next_state](ErrorCode e) { next_state->rejectWith(e); });
             };
         }
 
-        // If already settled, execute immediately
-        if (!isPending()) {
-            add_idle([state = m_promise]() {
-                if (state->isResolved() && state->success_cb) {
-                    state->success_cb(std::move(state->result_value));
-                } else if (state->isRejected() && state->error_cb) {
-                    state->error_cb(state->getErrorCode());
-                }
-                return false; // G_SOURCE_REMOVE
-            });
-        }
+        m_promise->executeIfSettled(m_promise);
 
         return next_op;
     }
@@ -815,13 +855,7 @@ public:
         spdlog::trace("AsyncOp[{}] adding tap", id());
         
         return this->then([f = std::forward<F>(side_effect_fn)](T value) mutable {
-            try {
-                f(value);
-            } catch (const std::exception& e) {
-                spdlog::warn("Exception in tap(): {}", e.what());
-            } catch (...) {
-                spdlog::warn("Unknown exception in tap()");
-            }
+            detail::executeProtectedSuppress([&]() { f(value); }, "tap()");
             return value;
         });
     }
@@ -862,13 +896,7 @@ public:
         spdlog::trace("AsyncOp[{}] adding tapError", id());
         
         return this->filter(nullptr, [f = std::forward<F>(side_effect_fn)](ErrorCode err) mutable -> T {
-            try {
-                f(err);
-            } catch (const std::exception& e) {
-                spdlog::warn("Exception in tapError(): {}", e.what());
-            } catch (...) {
-                spdlog::warn("Unknown exception in tapError()");
-            }
+            detail::executeProtectedSuppress([&]() { f(err); }, "tapError()");
             throw err;
         });
     }
@@ -900,13 +928,7 @@ public:
 
                 if (!*cleanup_done) {
                     *cleanup_done = true;
-                    try {
-                        (*cleanup)();
-                    } catch (const std::exception &e) {
-                        spdlog::error("Exception in finally(): {}", e.what());
-                    } catch (...) {
-                        spdlog::error("Unknown exception in finally()");
-                    }
+                    detail::executeProtectedSuppress([&]() { (*cleanup)(); }, "finally()", true);
                 }
 
                 result_state->resolveWith(std::move(val));
@@ -925,13 +947,7 @@ public:
 
                 if (!*cleanup_done) {
                     *cleanup_done = true;
-                    try {
-                        (*cleanup)();
-                    } catch (const std::exception &e) {
-                        spdlog::error("Exception in finally(): {}", e.what());
-                    } catch (...) {
-                        spdlog::error("Unknown exception in finally()");
-                    }
+                    detail::executeProtectedSuppress([&]() { (*cleanup)(); }, "finally()", true);
                 }
 
                 result_state->rejectWith(err);
@@ -1102,19 +1118,10 @@ public:
                 m_promise->status_flags.success_cb_is_propagating = 0;
                 m_promise->success_cb = [f = std::decay_t<SuccessF>(successFilter), result_state, op_id](T val) mutable {
                     spdlog::debug("AsyncOp[{}] executing filter success handler", op_id);
-                    try {
+                    detail::executeProtectedWithErrorCode([&]() {
                         T filtered = f(std::move(val));
                         result_state->resolveWith(std::move(filtered));
-                    } catch (ErrorCode err) {
-                        spdlog::debug("AsyncOp[{}] filter success handler rejected with {}", op_id, err);
-                        result_state->rejectWith(err);
-                    } catch (const std::exception& e) {
-                        spdlog::error("AsyncOp[{}] exception in filter success handler: {}", op_id, e.what());
-                        result_state->rejectWith(ErrorCode::Exception);
-                    } catch (...) {
-                        spdlog::error("AsyncOp[{}] unknown exception in filter success handler", op_id);
-                        result_state->rejectWith(ErrorCode::Exception);
-                    }
+                    }, op_id, "filter success handler", [result_state](ErrorCode e) { result_state->rejectWith(e); });
                 };
             }
         } else {
@@ -1137,19 +1144,10 @@ public:
                 m_promise->status_flags.error_cb_is_propagating = 0;
                 m_promise->error_cb = [f = std::decay_t<ErrorF>(errorFilter), result_state, op_id](ErrorCode err) mutable {
                     spdlog::debug("AsyncOp[{}] executing filter error handler", op_id);
-                    try {
+                    detail::executeProtectedWithErrorCode([&]() {
                         T recovered = f(err);
                         result_state->resolveWith(std::move(recovered));
-                    } catch (ErrorCode thrown) {
-                        spdlog::debug("AsyncOp[{}] filter error handler propagating {}", op_id, thrown);
-                        result_state->rejectWith(thrown);
-                    } catch (const std::exception& e) {
-                        spdlog::error("AsyncOp[{}] exception in filter error handler: {}", op_id, e.what());
-                        result_state->rejectWith(ErrorCode::Exception);
-                    } catch (...) {
-                        spdlog::error("AsyncOp[{}] unknown exception in filter error handler", op_id);
-                        result_state->rejectWith(ErrorCode::Exception);
-                    }
+                    }, op_id, "filter error handler", [result_state](ErrorCode e) { result_state->rejectWith(e); });
                 };
             }
         } else {
@@ -1163,17 +1161,7 @@ public:
             }
         }
 
-        // If already settled, execute immediately
-        if (!isPending()) {
-            add_idle([state = m_promise]() {
-                if (state->isResolved() && state->success_cb) {
-                    state->success_cb(std::move(state->result_value));
-                } else if (state->isRejected() && state->error_cb) {
-                    state->error_cb(state->getErrorCode());
-                }
-                return false;
-            });
-        }
+        m_promise->executeIfSettled(m_promise);
 
         return result;
     }
@@ -1407,7 +1395,7 @@ AsyncOp<T> retry(F&& operation, int max_attempts) {
 
 /**
  * @brief Execute async operation for each item SEQUENTIALLY
- * 
+ *
  * Processes one item at a time. Fails immediately on first error (remaining items NOT processed).
  * For parallel processing, use all() or mapParallel().
  */
@@ -1844,7 +1832,7 @@ auto defer(F&& f) -> AsyncOp<typename std::invoke_result<F>::type> {
     auto func = std::function<RetType()>(std::forward<F>(f));
     
     add_idle([result_state, func = std::move(func)]() {
-        try {
+        detail::executeProtected([&]() {
             if constexpr (std::is_void_v<RetType>) {
                 func();
                 result_state->resolveWith();
@@ -1852,13 +1840,7 @@ auto defer(F&& f) -> AsyncOp<typename std::invoke_result<F>::type> {
                 auto value = func();
                 result_state->resolveWith(std::move(value));
             }
-        } catch (const std::exception& e) {
-            spdlog::error("defer() function threw: {}", e.what());
-            result_state->rejectWith(ErrorCode::Exception);
-        } catch (...) {
-            spdlog::error("defer() function threw unknown exception");
-            result_state->rejectWith(ErrorCode::Exception);
-        }
+        }, 0, "defer()", [result_state](ErrorCode e) { result_state->rejectWith(e); });
         
         return false;
     });
