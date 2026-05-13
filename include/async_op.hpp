@@ -1323,7 +1323,7 @@ AsyncOp<T> retryWithBackoff(F&& operation, int max_attempts,
     auto result_state = result.m_promise;
     
     // State struct with attempt logic
-    struct RetryState : std::enable_shared_from_this<RetryState> {
+    struct RetryState {
         int current_attempt = 0;
         int max_attempts;
         std::chrono::milliseconds current_delay;
@@ -1333,41 +1333,41 @@ AsyncOp<T> retryWithBackoff(F&& operation, int max_attempts,
         RetryState(int max_att, std::chrono::milliseconds init_delay, F&& op, Promise<T> prom)
             : max_attempts(max_att), current_delay(init_delay), operation(std::forward<F>(op)), promise(prom) {}
 
-        void executeAttempt() {
+        void executeAttempt(std::shared_ptr<RetryState> self) {
             current_attempt++;
             spdlog::debug("Retry attempt {}/{}", current_attempt, max_attempts);
-            
+
             operation()
-                .then([self = this->shared_from_this()](T value) {
-                    spdlog::info("Retry succeeded on attempt {}/{}", 
+                .then([self](T value) {
+                    spdlog::info("Retry succeeded on attempt {}/{}",
                                 self->current_attempt, self->max_attempts);
                     self->promise->resolveWith(std::move(value));
                 })
-                .onError([self = this->shared_from_this()](ErrorCode err) {
+                .onError([self](ErrorCode err) {
                     if (self->current_attempt >= self->max_attempts) {
                         spdlog::error("Retry failed after {} attempts", self->max_attempts);
                         self->promise->rejectWith(ErrorCode::MaxRetriesExceeded);
                         return;
                     }
-                    
-                    spdlog::warn("Attempt {}/{} failed, retrying in {}ms", 
-                                self->current_attempt, self->max_attempts, 
+
+                    spdlog::warn("Attempt {}/{} failed, retrying in {}ms",
+                                self->current_attempt, self->max_attempts,
                                 self->current_delay.count());
-                    
+
                     auto delay = self->current_delay;
                     self->current_delay *= 2;
-                    
+
                     add_timeout(delay, [self]() {
-                        self->executeAttempt();  // ✅ Method call, not lambda recursion!
+                        self->executeAttempt(self);
                         return false;
                     });
                 });
         }
     };
-    
+
     auto state = std::make_shared<RetryState>(max_attempts, initial_delay, std::forward<F>(operation), result_state);
-    
-    state->executeAttempt();
+
+    state->executeAttempt(state);
     return result;
 }
 
@@ -1406,7 +1406,7 @@ AsyncOp<void> forEach(const std::vector<T>& items, F&& process) {
     AsyncOp<void> result;
     auto result_state = result.m_promise;
 
-    struct ForEachState : std::enable_shared_from_this<ForEachState> {
+    struct ForEachState {
         size_t index = 0;
         const std::vector<T>& items;
         F process;
@@ -1415,7 +1415,7 @@ AsyncOp<void> forEach(const std::vector<T>& items, F&& process) {
         ForEachState(const std::vector<T>& it, F&& proc, Promise<void> prom)
             : items(it), process(std::forward<F>(proc)), promise(prom) {}
 
-        void processNext() {
+        void processNext(std::shared_ptr<ForEachState> self) {
             if (index >= items.size()) {
                 spdlog::debug("forEach completed all {} items", items.size());
                 promise->resolveWith();
@@ -1425,11 +1425,11 @@ AsyncOp<void> forEach(const std::vector<T>& items, F&& process) {
             spdlog::trace("forEach processing item {}/{}", index + 1, items.size());
 
             process(items[index])
-                .then([self = this->shared_from_this()](auto) {
+                .then([self](auto) {
                     self->index++;
-                    self->processNext();
+                    self->processNext(self);
                 })
-                .onError([self = this->shared_from_this()](ErrorCode err) {
+                .onError([self](ErrorCode err) {
                     spdlog::error("forEach failed at item {}/{} with error {}",
                                  self->index + 1, self->items.size(), err);
                     self->promise->rejectWith(err);
@@ -1438,7 +1438,7 @@ AsyncOp<void> forEach(const std::vector<T>& items, F&& process) {
     };
 
     auto state = std::make_shared<ForEachState>(items, std::forward<F>(process), result_state);
-    state->processNext();
+    state->processNext(state);
     return result;
 }
 
@@ -1463,7 +1463,7 @@ AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& pr
         return AsyncOp<std::vector<Item>>::resolved(std::vector<Item>{});
     }
 
-    struct ForEachSettledState : std::enable_shared_from_this<ForEachSettledState> {
+    struct ForEachSettledState {
         size_t index = 0;
         const std::vector<Item>& items;
         F process;
@@ -1473,7 +1473,7 @@ AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& pr
         ForEachSettledState(const std::vector<Item>& it, F&& proc, Promise<std::vector<Item>> prom)
             : items(it), process(std::forward<F>(proc)), promise(prom) {}
 
-        void processNext() {
+        void processNext(std::shared_ptr<ForEachSettledState> self) {
             if (index >= items.size()) {
                 spdlog::debug("forEachSettled() completed all {} items, {} failed",
                              items.size(), failed_items.size());
@@ -1485,22 +1485,22 @@ AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& pr
             spdlog::trace("forEachSettled() processing item {}/{}", current + 1, items.size());
 
             process(items[current])
-                .then([self = this->shared_from_this()](auto) {
+                .then([self](auto) {
                     self->index++;
-                    self->processNext();
+                    self->processNext(self);
                 })
-                .onError([self = this->shared_from_this(), current](ErrorCode err) {
+                .onError([self, current](ErrorCode err) {
                     spdlog::debug("forEachSettled() item {}/{} failed with error {}",
                                  current + 1, self->items.size(), err);
                     self->failed_items.push_back(self->items[current]);
                     self->index++;
-                    self->processNext();
+                    self->processNext(self);
                 });
         }
     };
 
     auto state = std::make_shared<ForEachSettledState>(items, std::forward<F>(process), result_state);
-    state->processNext();
+    state->processNext(state);
     return result;
 }
 
@@ -1546,7 +1546,7 @@ auto mapSettled(const std::vector<Item>& items, F&& transform)
         return AsyncOp<std::vector<SettledResult<RetType>>>::resolved(std::vector<SettledResult<RetType>>{});
     }
 
-    struct MapSettledState : std::enable_shared_from_this<MapSettledState> {
+    struct MapSettledState {
         size_t index = 0;
         const std::vector<Item>& items;
         F transform;
@@ -1558,36 +1558,34 @@ auto mapSettled(const std::vector<Item>& items, F&& transform)
             results.resize(items.size());
         }
 
-        void processNext() {
+        void processNext(std::shared_ptr<MapSettledState> self) {
             if (index >= items.size()) {
                 spdlog::debug("mapSettled() completed all {} items", items.size());
                 promise->resolveWith(std::move(results));
                 return;
             }
 
-            size_t current = index;
+            size_t current = index++;
             spdlog::trace("mapSettled() processing item {}/{}", current + 1, items.size());
 
             transform(items[current])
-                .then([self = this->shared_from_this(), current](RetType value) {
+                .then([self, current](RetType value) {
                     self->results[current].status = SettledResult<RetType>::Fulfilled;
                     self->results[current].value = std::move(value);
-                    self->index++;
-                    self->processNext();
+                    self->processNext(self);
                 })
-                .onError([self = this->shared_from_this(), current](ErrorCode err) {
+                .onError([self, current](ErrorCode err) {
                     spdlog::debug("mapSettled() item {}/{} failed with error {}",
                                  current + 1, self->items.size(), err);
                     self->results[current].status = SettledResult<RetType>::Rejected;
                     self->results[current].error = err;
-                    self->index++;
-                    self->processNext();
+                    self->processNext(self);
                 });
         }
     };
 
     auto state = std::make_shared<MapSettledState>(items, std::forward<F>(transform), result_state);
-    state->processNext();
+    state->processNext(state);
     return result;
 }
 
@@ -1606,7 +1604,7 @@ AsyncOp<T> pollUntil(F&& operation, Pred&& condition, int max_attempts,
     AsyncOp<T> result;
     auto result_state = result.m_promise;
 
-    struct PollUntilState : std::enable_shared_from_this<PollUntilState> {
+    struct PollUntilState {
         int attempt = 0;
         int max_attempts;
         std::chrono::milliseconds interval;
@@ -1618,12 +1616,12 @@ AsyncOp<T> pollUntil(F&& operation, Pred&& condition, int max_attempts,
             : max_attempts(max_att), interval(intv), operation(std::forward<F>(op)),
               condition(std::forward<Pred>(cond)), promise(prom) {}
 
-        void poll() {
+        void poll(std::shared_ptr<PollUntilState> self) {
             attempt++;
             spdlog::trace("pollUntil attempt {}/{}", attempt, max_attempts);
 
             operation()
-                .then([self = this->shared_from_this()](T value) {
+                .then([self](T value) {
                     if (self->condition(value)) {
                         spdlog::info("pollUntil condition met on attempt {}/{}",
                                     self->attempt, self->max_attempts);
@@ -1633,7 +1631,7 @@ AsyncOp<T> pollUntil(F&& operation, Pred&& condition, int max_attempts,
                                      self->interval.count());
 
                         add_timeout(self->interval, [self]() {
-                            self->poll();
+                            self->poll(self);
                             return false;
                         });
                     } else {
@@ -1641,7 +1639,7 @@ AsyncOp<T> pollUntil(F&& operation, Pred&& condition, int max_attempts,
                         self->promise->rejectWith(ErrorCode::MaxRetriesExceeded);
                     }
                 })
-                .onError([self = this->shared_from_this()](ErrorCode err) {
+                .onError([self](ErrorCode err) {
                     spdlog::error("pollUntil failed on attempt {}/{} with error {}",
                                  self->attempt, self->max_attempts, err);
                     self->promise->rejectWith(err);
@@ -1653,7 +1651,7 @@ AsyncOp<T> pollUntil(F&& operation, Pred&& condition, int max_attempts,
                                                    std::forward<F>(operation),
                                                    std::forward<Pred>(condition),
                                                    result_state);
-    state->poll();
+    state->poll(state);
     return result;
 }
 
@@ -1919,7 +1917,7 @@ auto map(const std::vector<T>& items, F&& transform)
     AsyncOp<std::vector<RetType>> result;
     auto result_state = result.m_promise;
 
-    struct MapState : std::enable_shared_from_this<MapState> {
+    struct MapState {
         size_t index = 0;
         const std::vector<T>& items;
         F transform;
@@ -1931,7 +1929,7 @@ auto map(const std::vector<T>& items, F&& transform)
             results.reserve(items.size());
         }
 
-        void processNext() {
+        void processNext(std::shared_ptr<MapState> self) {
             if (index >= items.size()) {
                 spdlog::debug("map() completed all {} items", items.size());
                 promise->resolveWith(std::move(results));
@@ -1941,12 +1939,12 @@ auto map(const std::vector<T>& items, F&& transform)
             spdlog::trace("map() processing item {}/{}", index + 1, items.size());
 
             transform(items[index])
-                .then([self = this->shared_from_this()](RetType value) {
+                .then([self](RetType value) {
                     self->results.push_back(std::move(value));
                     self->index++;
-                    self->processNext();
+                    self->processNext(self);
                 })
-                .onError([self = this->shared_from_this()](ErrorCode err) {
+                .onError([self](ErrorCode err) {
                     spdlog::error("map() failed at item {}/{}", self->index + 1, self->items.size());
                     self->promise->rejectWith(err);
                 });
@@ -1954,7 +1952,7 @@ auto map(const std::vector<T>& items, F&& transform)
     };
 
     auto state = std::make_shared<MapState>(items, std::forward<F>(transform), result_state);
-    state->processNext();
+    state->processNext(state);
     return result;
 }
 
