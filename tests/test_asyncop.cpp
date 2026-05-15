@@ -257,6 +257,56 @@ void testErrorInMiddle()
     runValueTest("Only callbacks before error executed", 1, callbacks_executed);
 }
 
+void testThenException()
+{
+    std::cout << "\n=== Testing then() with std::exception ===" << std::endl;
+
+    bool error_caught = false;
+    ao::ErrorCode caught_error = ao::ErrorCode::None;
+    bool then_executed = false;
+
+    simulateComputation(10, 50)
+        .then([&](int val) -> int {
+            then_executed = true;
+            throw std::runtime_error("Intentional then() failure");
+            return val;  // Unreachable, keeps return type as int
+        })
+        .then([](int) {
+            // Should not execute
+        })
+        .onError([&](ao::ErrorCode err) {
+            error_caught = true;
+            caught_error = err;
+        });
+
+    runEventLoopFor(150);
+
+    runTest("then() std::exception caught", true, error_caught);
+    runTest("then() std::exception converted to Exception",
+            ao::ErrorCode::Exception == caught_error, true);
+    runTest("then() executed before throw", true, then_executed);
+}
+
+void testThenVoidReturn()
+{
+    std::cout << "\n=== Testing then() T -> void Return Type ===" << std::endl;
+
+    bool void_chain_resolved = false;
+
+    // then() returning nothing converts to AsyncOp<void>
+    simulateComputation(10, 50)
+        .then([](int value) {
+            // No return -> AsyncOp<void>
+        })
+        .then([&]() {
+            void_chain_resolved = true;
+        });
+
+    runEventLoopFor(100);
+
+    runTest("then() with void return chain resolved", true, void_chain_resolved);
+}
+
 // ══════════════════════════════════════════════
 // ERROR RECOVERY TESTS (NEW)
 // ══════════════════════════════════════════════
@@ -606,6 +656,65 @@ void testRecoverBranching()
     runTest("Branching: then() skipped on error", true, then_skipped);
     runTest("Branching: recover() called on error", true, recovery_called);
     runTest("Branching: then() after recover() called", true, recovery_then_called);
+}
+
+void testRecover()
+{
+    std::cout << "\n=== Testing recover() Basic Recovery ===" << std::endl;
+
+    // Test 1: recover() converts error to success value
+    bool recovered = false;
+    int final_value = 0;
+
+    simulateComputation(10, 50, true)  // Will fail
+        .recover([](ao::ErrorCode) -> int {
+            return 888;  // Convert error to success
+        })
+        .then([&](int value) {
+            recovered = true;
+            final_value = value;
+        });
+
+    runEventLoopFor(150);
+
+    runTest("recover() converted error to success", true, recovered);
+    runValueTest("recover() produced fallback value", 888, final_value);
+
+    // Test 2: recover() propagates success unchanged
+    bool success_passed = false;
+    int success_value = 0;
+
+    simulateComputation(10, 50)  // Will succeed
+        .recover([](ao::ErrorCode) -> int {
+            return 999;  // Should NOT be called
+        })
+        .then([&](int value) {
+            success_passed = true;
+            success_value = value;
+        });
+
+    runEventLoopFor(100);
+
+    runTest("recover() propagated success", true, success_passed);
+    runValueTest("recover() success value unchanged", 20, success_value);
+
+    // Test 3: recover() with AsyncOp return
+    bool async_recovered = false;
+    int async_value = 0;
+
+    simulateComputation(5, 50, true)  // Will fail
+        .recover([](ao::ErrorCode err) {
+            return simulateComputation(100, 50);  // Recover with async op
+        })
+        .then([&](int value) {
+            async_recovered = true;
+            async_value = value;
+        });
+
+    runEventLoopFor(200);
+
+    runTest("recover() with AsyncOp return recovered", true, async_recovered);
+    runValueTest("recover() with AsyncOp return value", 200, async_value);
 }
 
 void testNext()
@@ -1231,6 +1340,73 @@ void testPollUntilMaxAttempts()
             true);
 }
 
+void testEmptyCollections()
+{
+    std::cout << "\n=== Testing Empty Collection Operations ===" << std::endl;
+
+    // Empty all()
+    bool empty_all_resolved = false;
+    std::vector<int> empty_all_results;
+
+    ao::all(std::vector<ao::AsyncOp<int>>{})
+        .then([&](std::vector<int> results) {
+            empty_all_resolved = true;
+            empty_all_results = std::move(results);
+        });
+
+    runEventLoopFor(50);
+
+    runTest("all() with empty vector resolves", true, empty_all_resolved);
+    runValueTest("all() empty result size", 0, static_cast<int>(empty_all_results.size()));
+
+    // Empty allSettled()
+    bool empty_settled_resolved = false;
+
+    ao::allSettled(std::vector<ao::AsyncOp<int>>{})
+        .then([&](std::vector<ao::SettledResult<int>> results) {
+            empty_settled_resolved = true;
+            runValueTest("allSettled() empty result size", 0, static_cast<int>(results.size()));
+        });
+
+    runEventLoopFor(50);
+
+    runTest("allSettled() with empty vector resolves", true, empty_settled_resolved);
+
+    // Empty race() - should reject
+    bool empty_race_rejected = false;
+    ao::ErrorCode empty_race_error = ao::ErrorCode::None;
+
+    ao::race(std::vector<ao::AsyncOp<std::string>>{})
+        .then([](std::string) {
+            // Should not execute
+        })
+        .onError([&](ao::ErrorCode err) {
+            empty_race_rejected = true;
+            empty_race_error = err;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("race() with empty vector rejects", true, empty_race_rejected);
+    runTest("race() empty error is InvalidResponse",
+            ao::ErrorCode::InvalidResponse == empty_race_error, true);
+
+    // Empty any() - should reject
+    bool empty_any_rejected = false;
+
+    ao::any(std::vector<ao::AsyncOp<int>>{})
+        .then([](int) {
+            // Should not execute
+        })
+        .onError([&](ao::ErrorCode) {
+            empty_any_rejected = true;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("any() with empty vector rejects", true, empty_any_rejected);
+}
+
 // ══════════════════════════════════════════════
 // UTILITY TESTS
 // ══════════════════════════════════════════════
@@ -1353,6 +1529,20 @@ void testDefer()
     
     runTest("defer() executed", true, executed);
     runValueTest("defer() result", 42, result);
+
+    // Test 2: defer() with void return
+    bool void_executed = false;
+
+    ao::defer([]() {
+        // Side effect only, no return
+    })
+    .then([&]() {
+        void_executed = true;
+    });
+
+    runEventLoopFor(50);
+
+    runTest("defer() with void return executed", true, void_executed);
 }
 
 void testDeferException()
@@ -1550,6 +1740,14 @@ void testStateHelpers()
     runTest("rejectWith called callback", true, rejected_called);
     runTest("State isRejected after reject", true, op2.m_promise->isRejected());
     runTest("State isSettled after reject", true, op2.m_promise->isSettled());
+
+    // Test errorCode() and id() getters
+    runTest("errorCode() returns NetworkError",
+            ao::ErrorCode::NetworkError == op2.m_promise->getErrorCode(), true);
+    runTest("errorCode() via AsyncOp accessor",
+            ao::ErrorCode::NetworkError == op2.errorCode(), true);
+    runTest("id() returns positive value", op1.id() > 0, true);
+    runTest("id() consistent with op_id", op1.id() == op1.m_promise->op_id, true);
 }
 
 void testIdempotency()
@@ -1631,6 +1829,31 @@ void testTapWithError()
     runTest("Error caught after tap", true, error_caught);
 }
 
+void testTapException()
+{
+    std::cout << "\n=== Testing tap() Exception Suppression ===" << std::endl;
+
+    bool tap_executed = false;
+    bool then_executed = false;
+    int final_value = 0;
+
+    simulateComputation(21, 50)
+        .tap([&](int) {
+            tap_executed = true;
+            throw std::runtime_error("Intentional tap() exception");
+        })
+        .then([&](int value) {
+            then_executed = true;
+            final_value = value;
+        });
+
+    runEventLoopFor(150);
+
+    runTest("tap() executed before exception", true, tap_executed);
+    runTest("then() executed despite tap() exception", true, then_executed);
+    runValueTest("value passed through after tap() exception", 42, final_value);
+}
+
 void testTapError()
 {
     std::cout << "\n=== Testing tapError() ===" << std::endl;
@@ -1687,6 +1910,35 @@ void testTapErrorWithSuccess()
     runTest("tapError() not executed on success", false, tapError_executed);
     runTest("then() executed after tapError()", true, then_executed);
     runValueTest("Value passed through tapError() unchanged", 42, final_value);
+}
+
+void testTapErrorException()
+{
+    std::cout << "\n=== Testing tapError() Exception Suppression ===" << std::endl;
+
+    bool tapError_executed = false;
+    bool error_caught = false;
+    ao::ErrorCode caught_error = ao::ErrorCode::None;
+
+    simulateComputation(21, 50, true)
+        .tapError([&](ao::ErrorCode err) {
+            tapError_executed = true;
+            throw std::runtime_error("Intentional tapError() exception");
+        })
+        .then([](int) {
+            // Should NOT execute
+        })
+        .onError([&](ao::ErrorCode err) {
+            error_caught = true;
+            caught_error = err;
+        });
+
+    runEventLoopFor(150);
+
+    runTest("tapError() executed before exception", true, tapError_executed);
+    runTest("Error caught despite tapError() exception", true, error_caught);
+    runTest("Original error preserved through tapError() exception",
+            ao::ErrorCode::InvalidResponse == caught_error, true);
 }
 
 void testFinally()
@@ -2104,6 +2356,47 @@ void testFilter()
     runEventLoopFor(50);
 
     runTest("filter() chain continues", true, filter_chain_works);
+
+    // Test 9: Success filter throwing std::exception (not ErrorCode)
+    bool std_ex_success_caught = false;
+    ao::ErrorCode std_ex_success_error = ao::ErrorCode::None;
+
+    ao::AsyncOp<int>::resolved(42)
+        .filter([](int) -> int {
+            throw std::runtime_error("success filter std::exception");
+        }, nullptr)
+        .then([&](int) {
+            // Should not execute
+        })
+        .onError([&](ao::ErrorCode err) {
+            std_ex_success_caught = true;
+            std_ex_success_error = err;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() std::exception in success filter caught", true, std_ex_success_caught);
+    runTest("filter() std::exception in success filter → Exception",
+            ao::ErrorCode::Exception == std_ex_success_error, true);
+
+    // Test 10: Error filter throwing std::exception
+    bool std_ex_error_caught = false;
+    ao::ErrorCode std_ex_error_error = ao::ErrorCode::None;
+
+    ao::AsyncOp<int>::rejected(ao::ErrorCode::Timeout)
+        .filter(nullptr, [](ao::ErrorCode) -> int {
+            throw std::runtime_error("error filter std::exception");
+        })
+        .onError([&](ao::ErrorCode err) {
+            std_ex_error_caught = true;
+            std_ex_error_error = err;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("filter() std::exception in error filter caught", true, std_ex_error_caught);
+    runTest("filter() std::exception in error filter → Exception",
+            ao::ErrorCode::Exception == std_ex_error_error, true);
 }
 
 void testFilterWithVoid()
@@ -2649,6 +2942,8 @@ int test_main_asyncop()
         testErrorHandling();
         testErrorPropagation();
         testErrorInMiddle();
+        testThenException();
+        testThenVoidReturn();
 
         // Error recovery (NEW)
         testOtherwise();
@@ -2659,6 +2954,7 @@ int test_main_asyncop()
         testOrElse();
         testRecoverFrom();
         testRecoverBranching();
+        testRecover();
         testNext();
         testNextErrorPath();
         testNextWithAsyncOp();
@@ -2689,6 +2985,7 @@ int test_main_asyncop()
         testRaceFirstFailure();
         testPollUntilSuccess();
         testPollUntilMaxAttempts();
+        testEmptyCollections();
 
         // Utilities
         testIdGeneration();
@@ -2706,8 +3003,10 @@ int test_main_asyncop()
         // Advanced features
         testTap();
         testTapWithError();
+        testTapException();
         testTapError();
         testTapErrorWithSuccess();
+        testTapErrorException();
         testFinally();
         testFinallyOnError();
         testAllSettled();
