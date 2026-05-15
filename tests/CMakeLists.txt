@@ -33,13 +33,26 @@ target_include_directories(test_asyncop_glib PRIVATE ${GLIB_INCLUDE_DIRS})
 target_compile_options(test_asyncop_glib PRIVATE ${GLIB_CFLAGS_OTHER})
 target_link_libraries(test_asyncop_glib ${GLIB_LIBRARIES} spdlog::spdlog)
 
+# Duplicate message ID test - GLib backend
+add_executable(test_msgregistry_duplicate_glib test_msgregistry_duplicate.cpp)
+target_include_directories(test_msgregistry_duplicate_glib PRIVATE ${GLIB_INCLUDE_DIRS})
+target_compile_options(test_msgregistry_duplicate_glib PRIVATE ${GLIB_CFLAGS_OTHER})
+target_link_libraries(test_msgregistry_duplicate_glib ${GLIB_LIBRARIES} spdlog::spdlog)
+
 # Enable testing
 enable_testing()
 
 if(Qt5_FOUND)
     add_test(NAME test_asyncop_qt COMMAND test_asyncop_qt)
+    # Duplicate message ID test - Qt backend
+    add_executable(test_msgregistry_duplicate_qt test_msgregistry_duplicate.cpp)
+    set_target_properties(test_msgregistry_duplicate_qt PROPERTIES COMPILE_DEFINITIONS "ASYNC_USE_QT")
+    target_include_directories(test_msgregistry_duplicate_qt PRIVATE ${Qt5Core_INCLUDE_DIRS})
+    target_link_libraries(test_msgregistry_duplicate_qt Qt5::Core Qt5::Widgets spdlog::spdlog)
+    add_test(NAME test_msgregistry_duplicate_qt COMMAND test_msgregistry_duplicate_qt)
 endif()
 add_test(NAME test_asyncop_glib COMMAND test_asyncop_glib)
+add_test(NAME test_msgregistry_duplicate_glib COMMAND test_msgregistry_duplicate_glib)
 
 # Valgrind memory leak checks
 find_program(VALGRIND_EXECUTABLE valgrind)
