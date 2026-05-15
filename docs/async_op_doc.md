@@ -22,6 +22,10 @@
 10. [Best Practices](#best-practices)
 11. [Performance Considerations](#performance-considerations)
 12. [Integration Guide](#integration-guide)
+13. [Additional Utilities](#additional-utilities)
+14. [Troubleshooting](#troubleshooting)
+15. [API Summary](#api-summary)
+16. [Deprecated APIs](#deprecated-apis)
 
 ---
 
@@ -133,6 +137,15 @@ ErrorCode has built-in fmt/spdlog formatting:
 ```cpp
 spdlog::error("Operation failed: {}", error_code);  // Prints "NetworkError", not "2"
 ```
+
+For string conversion without spdlog:
+```cpp
+const char* name = ao::error_code_name(err);  // "NetworkError"
+```
+
+> **Exception handling:** In all chain methods (`then()`, `recover()`, `next()`, `filter()`),
+> thrown `std::exception` is automatically caught and converted to `ErrorCode::Exception`.
+> Throw `ErrorCode` directly to reject with a specific error code.
 
 ---
 
@@ -250,6 +263,7 @@ auto then(F&& f) -> AsyncOp<U>;  // Where F: (T -> U) or (T -> AsyncOp<U>)
 
 **Returns:** New `AsyncOp<U>` with transformed type
 **Propagates:** Errors unchanged (auto-propagation)
+**Exceptions:** Thrown `std::exception` → caught and converted to `ErrorCode::Exception`
 **Example:**
 ```cpp
 fetchValue()
@@ -282,6 +296,7 @@ auto recover(F&& f) -> AsyncOp<T>;  // Where F: (ErrorCode -> T) or (ErrorCode -
 
 **Returns:** New `AsyncOp<T>` (same type)
 **Propagates:** Success values unchanged (auto-propagation)
+**Exceptions:** Thrown `std::exception` → caught and converted to `ErrorCode::Exception`
 **Handler returns:**
 - `T` or `AsyncOp<T>`: Recovery succeeds, becomes success
 - `throw ErrorCode`: Propagate error (same or different)
@@ -342,6 +357,7 @@ auto next(SuccessF&& success_fn, ErrorF&& error_fn) -> AsyncOp<U>;
 
 **Returns:** New `AsyncOp<U>` 
 **Requirement:** Both handlers must return same type `U`
+**Exceptions:** Thrown `std::exception` → caught and converted to `ErrorCode::Exception`
 
 **Example:**
 ```cpp
@@ -447,6 +463,7 @@ auto filter(SuccessF&& success_fn, ErrorF&& error_fn) -> AsyncOp<T>;
 **Throw/Return semantics:**
 - **Success filter:** Return `T` to pass, throw `ErrorCode` to reject
 - **Error filter:** Return `T` to recover, throw `ErrorCode` to propagate
+- **Exception safety:** Thrown `std::exception` is caught and converted to `ErrorCode::Exception`
 
 **Example:**
 ```cpp
@@ -662,6 +679,49 @@ bool isSettled() const;      // Either resolved or rejected
 ErrorCode errorCode() const; // Get error (if rejected)
 id_type id() const;          // Get unique operation ID (for logging)
 ```
+
+### AsyncOp\<void\> Specialization
+
+`AsyncOp<void>` is a specialization for operations that complete without producing a value
+(e.g., side effects, `delay()`, `forEach()`). It has the same API surface as `AsyncOp<T>`
+but with **no value parameter** in success handlers:
+
+```cpp
+// AsyncOp<int>: handlers receive a value
+ao::AsyncOp<int>::resolved(42)
+    .then([](int value) { /* value is 42 */ });
+
+// AsyncOp<void>: handlers receive nothing
+ao::AsyncOp<void>::resolved()
+    .then([]() { /* no value */ });
+```
+
+**Key differences from `AsyncOp<T>`:**
+
+| Method | `AsyncOp<T>` Signature | `AsyncOp<void>` Signature |
+|--------|----------------------|--------------------------|
+| `.then(f)` | `f(T) -> U` | `f() -> U` |
+| `.onSuccess(f)` | `f(T)` | `f()` |
+| `.recover(f)` | `f(ErrorCode) -> T` | `f(ErrorCode) -> void` |
+| `.next(s, e)` | `s(T)->U, e(ErrorCode)->U` | `s()->void, e(ErrorCode)->void` |
+| `.filter(s, e)` | `s(T)->T, e(ErrorCode)->T` | `s()->void, e(ErrorCode)->void` |
+| `.tap(f)` | `f(T)` | `f()` |
+
+**Factories:**
+```cpp
+auto op = ao::AsyncOp<void>::resolved();
+auto err = ao::AsyncOp<void>::rejected(ao::ErrorCode::Timeout);
+```
+
+Several utility functions naturally return `AsyncOp<void>`:
+- `delay()` — wait for a duration
+- `forEach()` / `forEachSettled()` — execute per-item operations
+
+> **Tip:** When a `then()` lambda omits the return statement, the chain becomes `AsyncOp<void>`:
+> ```cpp
+> op.then([](int x) { log(x); });        // Returns AsyncOp<void>
+> op.then([](int x) { return x * 2; });  // Returns AsyncOp<int>
+> ```
 
 ---
 
@@ -1028,6 +1088,10 @@ ao::mapSettled(urls, [](std::string url) {
     });
 ```
 
+> **Empty input behavior:**
+> - `all([])` and `allSettled([])`: resolve with empty result vector
+> - `race([])` and `any([])`: reject with `ErrorCode::InvalidResponse`
+
 ---
 
 ## Advanced Patterns
@@ -1105,6 +1169,43 @@ ao::defer([]() {
         displayResult(r);
     });
 ```
+
+### Polling Pattern
+
+Repeatedly execute an operation at intervals until a condition is met or max attempts
+are exhausted:
+
+```cpp
+template<typename T, typename F, typename Pred>
+AsyncOp<T> pollUntil(F&& operation, Pred&& condition,
+                     int max_attempts,
+                     std::chrono::milliseconds interval);
+```
+
+**Example:**
+```cpp
+ao::pollUntil<int>(
+    []() {
+        return fetchStatus();  // Returns AsyncOp<int>
+    },
+    [](int value) {
+        return value >= 100;  // Poll until value reaches 100
+    },
+    10,           // Max 10 attempts
+    500ms         // 500ms between polls
+)
+    .then([](int result) {
+        spdlog::info("Target reached: {}", result);
+    })
+    .onError([](ErrorCode err) {
+        if (err == ErrorCode::MaxRetriesExceeded) {
+            spdlog::error("Polling exhausted");
+        }
+    });
+```
+
+> **Rejects** with `ErrorCode::MaxRetriesExceeded` if condition is never met.
+> If the operation itself rejects, that error propagates immediately (no retry).
 
 ### Conditional Execution
 
@@ -1724,6 +1825,20 @@ fetchData()
 | `defer(f)` | Execute sync function async |
 | `retry(op, n)` | Retry immediately |
 | `retryWithBackoff(op, n, d)` | Retry with exponential backoff |
+| `pollUntil(op, cond, n, d)` | Poll until condition met or max attempts |
+| `makePromise<T>()` | Create shared promise state |
+| `makeFuture<T>(promise)` | Create AsyncOp from promise |
+
+---
+
+## Deprecated APIs
+
+The following methods are deprecated and will be removed in a future version:
+
+| Deprecated | Replacement |
+|------------|-------------|
+| `.orElse(T val, string msg)` | `.otherwise([](ErrorCode e) { return val; })` |
+| `.recoverFrom(ErrorCode, F)` | `.filterError([](ErrorCode e) { if (e == code) return ...; throw e; })` |
 
 ---
 
