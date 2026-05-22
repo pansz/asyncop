@@ -26,3 +26,6 @@ package-lock.json
 # Claude Code
 CLAUDE.md
 .clinerules
+
+# Review reports
+CODE_REVIEW_REPORT.md
