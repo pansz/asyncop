@@ -5,9 +5,21 @@ All notable changes to AsyncOp will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Latest:** [2.4.2](#242---2026-05-22) - See [README.md](README.md#version) for brief summary.
+**Latest:** [2.5.0](#250---2026-05-22) - See [README.md](README.md#version) for brief summary.
 
 ---
+
+## [2.5.0] - 2026-05-22
+
+### Fixed
+- `next()` void return support - Success and error handlers can now return `void` or `AsyncOp<void>` without compilation errors
+- `map()`/`forEach()` dangling reference - Collection functions now take vectors by value to prevent use-after-free when caller's vector goes out of scope
+- `MessageRegistry` destructor - Pending timeout timers are now cancelled during destruction to prevent dangling callbacks
+
+### Changed
+- **API Cleanup:** Removed `resolve()` and `reject()` from `AsyncOp` public interface. Use `promise()->resolveWith()` and `promise()->rejectWith()` instead
+- **Encapsulation:** `m_promise` is now private in both `AsyncOp<T>` and `AsyncOp<void>`. Use the public `promise()` accessor
+- Collection functions (`map()`, `forEach()`, `forEachSettled()`, `mapSettled()`, `mapParallel()`) parameter changed from `const std::vector<T>&` to `std::vector<T>` (value semantics)
 
 ## [2.4.2] - 2026-05-22
 
