@@ -5,9 +5,22 @@ All notable changes to AsyncOp will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Latest:** [2.4.1](#241---2026-02-27) - See [README.md](README.md#version) for brief summary.
+**Latest:** [2.4.2](#242---2026-05-22) - See [README.md](README.md#version) for brief summary.
 
 ---
+
+## [2.4.2] - 2026-05-22
+
+### Fixed
+- `next()` static_assert order - Moved `using` declarations into `else` branch and added `safe_invoke_result` helper to prevent hard template errors before `static_assert` fires when `nullptr` is passed
+- `IdGen` dead code - Removed unused `last_timestamp_ms_` member and its CAS loop
+- `IdGen` counter type - Changed `global_counter_` from `int32_t` to `uint32_t` to avoid implementation-defined behavior on negative bit operations
+
+### Changed
+- Documentation: Clarified that `onError()` is a terminal handler and does not propagate errors to subsequent chained operations
+- Documentation: Fixed `all()` example to use same-type operations and added note about homogeneous type requirement
+- Removed version history comments from `async_op.hpp` header (maintained in CHANGELOG.md only)
+- Removed version numbers from `examples/CMakeLists.txt` and `tests/CMakeLists.txt`
 
 ## [2.4.1] - 2026-02-27
 

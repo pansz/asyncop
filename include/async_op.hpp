@@ -17,18 +17,7 @@
  * @note See async_op_doc.md for comprehensive usage guide
  * @note Requires ao_event_loop.hpp, spdlog
  * @note C++17 or later
- *
- * v2.4.1 Changes:
- * - Added: filterSuccess() - Convenience wrapper for success-only filtering
- * - Added: filterError() - Convenience wrapper for error-only filtering
- * - Fixed: next() nullptr handling with dependent static_assert
- * - Updated: filter() documentation to feature new convenience wrappers
- *
- * v2.4 Changes:
- * - Added: cancel() - Reject pending operations with configurable error code
- * - Added: filter() - Dual-path success/error filtering with throw/return semantics
- * - Deprecated: orElse() - Use otherwise() with explicit logic instead
- * - Deprecated: recoverFrom() - Use filter() with error filter instead
+ * @note See CHANGELOG.md for version history
  */
 
 #ifndef ASYNC_OP_HPP
