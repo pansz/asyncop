@@ -395,19 +395,18 @@ public:
      */
     template<typename SuccessF, typename ErrorF>
     auto next(SuccessF&& success_handler, ErrorF&& error_handler) -> AsyncOp<void> {
-        using SuccessInvokeResult = typename std::invoke_result<SuccessF>::type;
-        using ErrorInvokeResult = typename std::invoke_result<ErrorF, ErrorCode>::type;
+        using SuccessInvokeResult = typename ao::detail::safe_invoke_result<SuccessF>::type;
+        using ErrorInvokeResult = typename ao::detail::safe_invoke_result<ErrorF, ErrorCode>::type;
 
-        if constexpr (std::is_null_pointer_v<ErrorF>) {
-            if constexpr (std::is_null_pointer_v<SuccessF>) {
+        if constexpr (std::is_null_pointer_v<ErrorF> || std::is_null_pointer_v<SuccessF>) {
+            if constexpr (std::is_null_pointer_v<ErrorF> && std::is_null_pointer_v<SuccessF>) {
                 static_assert(dependent_false_v<SuccessF>, "next() does not accept nullptr, use filter() instead.");
-            } else {
-                AsyncOp<void> next_op;
+            } else if constexpr (std::is_null_pointer_v<ErrorF>) {
                 static_assert(dependent_false_v<SuccessF>, "next() does not accept nullptr, use then() instead.");
-                return next_op;
+            } else {
+                static_assert(dependent_false_v<ErrorF>, "next() does not accept nullptr, use recover() instead.");
             }
-        } else if constexpr (std::is_null_pointer_v<SuccessF>) {
-            static_assert(dependent_false_v<ErrorF>, "next() does not accept nullptr, use recover() instead.");
+            return AsyncOp<void>{};
         } else {
             // For void specialization, we need to check if handlers return void or AsyncOp<void>
             static_assert(
@@ -419,62 +418,61 @@ public:
                 "next() error handler must return void or AsyncOp<void>"
             );
 
+            spdlog::trace("AsyncOp<void>[{}] adding next() with dual handlers", id());
+            
+            AsyncOp<void> next_op;
+
+            auto next_state = next_op.m_promise;
+            auto op_id = m_promise->op_id;
+
+            if (!m_promise->canOverwriteSuccessCallback()) {
+                spdlog::error("AsyncOp[{}] next() called after terminal success handler", id());
+                assert(false && "next() cannot overwrite existing non-propagating success callback");
+            } else {
+                m_promise->status_flags.success_cb_is_propagating = 0;
+                // Set success handler
+                m_promise->success_cb = [success_handler = std::forward<SuccessF>(success_handler), next_state,
+                                         op_id]() mutable {
+                    spdlog::debug("AsyncOp<void>[{}] executing next() success handler", op_id);
+                    detail::executeProtected([&]() {
+                        if constexpr (is_async_op_v<SuccessInvokeResult>) {
+                            auto result_op = success_handler();
+                            result_op.then([next_state]() mutable { next_state->resolveWith(); })
+                                .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                        } else {
+                            success_handler();
+                            next_state->resolveWith();
+                        }
+                    }, op_id, "next() success handler", [next_state](ErrorCode e) { next_state->rejectWith(e); });
+                };
+            }
+
+            if (!m_promise->canOverwriteErrorCallback()) {
+                spdlog::error("AsyncOp[{}] next() called after terminal error handler", id());
+                assert(false && "next() cannot overwrite existing non-propagating error callback");
+            } else {
+                m_promise->status_flags.error_cb_is_propagating = 0;
+                // Set error handler
+                m_promise->error_cb = [error_handler = std::forward<ErrorF>(error_handler), next_state,
+                                       op_id](ErrorCode err) mutable {
+                    spdlog::debug("AsyncOp<void>[{}] executing next() error handler", op_id);
+                    detail::executeProtectedWithErrorCode([&]() {
+                        if constexpr (is_async_op_v<ErrorInvokeResult>) {
+                            auto result_op = error_handler(err);
+                            result_op.then([next_state]() mutable { next_state->resolveWith(); })
+                                .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                        } else {
+                            error_handler(err);
+                            next_state->resolveWith();
+                        }
+                    }, op_id, "next() error handler", [next_state](ErrorCode e) { next_state->rejectWith(e); });
+                };
+            }
+
+            m_promise->executeIfSettled(m_promise);
+
+            return next_op;
         }
-
-        spdlog::trace("AsyncOp<void>[{}] adding next() with dual handlers", id());
-        
-        AsyncOp<void> next_op;
-
-        auto next_state = next_op.m_promise;
-        auto op_id = m_promise->op_id;
-
-        if (!m_promise->canOverwriteSuccessCallback()) {
-            spdlog::error("AsyncOp[{}] next() called after terminal success handler", id());
-            assert(false && "next() cannot overwrite existing non-propagating success callback");
-        } else {
-            m_promise->status_flags.success_cb_is_propagating = 0;
-            // Set success handler
-            m_promise->success_cb = [success_handler = std::forward<SuccessF>(success_handler), next_state,
-                                     op_id]() mutable {
-                spdlog::debug("AsyncOp<void>[{}] executing next() success handler", op_id);
-                detail::executeProtected([&]() {
-                    if constexpr (is_async_op_v<SuccessInvokeResult>) {
-                        auto result_op = success_handler();
-                        result_op.then([next_state]() mutable { next_state->resolveWith(); })
-                            .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
-                    } else {
-                        success_handler();
-                        next_state->resolveWith();
-                    }
-                }, op_id, "next() success handler", [next_state](ErrorCode e) { next_state->rejectWith(e); });
-            };
-        }
-
-        if (!m_promise->canOverwriteErrorCallback()) {
-            spdlog::error("AsyncOp[{}] next() called after terminal error handler", id());
-            assert(false && "next() cannot overwrite existing non-propagating error callback");
-        } else {
-            m_promise->status_flags.error_cb_is_propagating = 0;
-            // Set error handler
-            m_promise->error_cb = [error_handler = std::forward<ErrorF>(error_handler), next_state,
-                                   op_id](ErrorCode err) mutable {
-                spdlog::debug("AsyncOp<void>[{}] executing next() error handler", op_id);
-                detail::executeProtectedWithErrorCode([&]() {
-                    if constexpr (is_async_op_v<ErrorInvokeResult>) {
-                        auto result_op = error_handler(err);
-                        result_op.then([next_state]() mutable { next_state->resolveWith(); })
-                            .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
-                    } else {
-                        error_handler(err);
-                        next_state->resolveWith();
-                    }
-                }, op_id, "next() error handler", [next_state](ErrorCode e) { next_state->rejectWith(e); });
-            };
-        }
-
-        m_promise->executeIfSettled(m_promise);
-
-        return next_op;
     }
     
     /**
