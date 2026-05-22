@@ -982,7 +982,7 @@ Processes items **one at a time**, collects results. Fails on first error.
 
 ```cpp
 template<typename T, typename F>
-auto map(const std::vector<T>& items, F&& transform) 
+auto map(std::vector<T> items, F&& transform)
     -> AsyncOp<std::vector<U>>;  // Where F: (T -> AsyncOp<U>)
 ```
 
@@ -1005,7 +1005,7 @@ Processes items **simultaneously**, collects results. Fails on first error.
 
 ```cpp
 template<typename T, typename F>
-auto mapParallel(const std::vector<T>& items, F&& transform)
+auto mapParallel(std::vector<T> items, F&& transform)
     -> AsyncOp<std::vector<U>>;
 ```
 
@@ -1028,7 +1028,7 @@ Executes operation for each item **sequentially**. Fails immediately on first er
 
 ```cpp
 template<typename T, typename F>
-AsyncOp<void> forEach(const std::vector<T>& items, F&& process);
+AsyncOp<void> forEach(std::vector<T> items, F&& process);
 ```
 
 **Example:**
@@ -1049,7 +1049,7 @@ Processes **all** items sequentially, returns list of failed items.
 
 ```cpp
 template<typename Item, typename F>
-AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& process);
+AsyncOp<std::vector<Item>> forEachSettled(std::vector<Item> items, F&& process);
 ```
 
 **Example:**
@@ -1073,7 +1073,7 @@ Processes items **sequentially**, returns `SettledResult` for each (both success
 
 ```cpp
 template<typename Item, typename F>
-auto mapSettled(const std::vector<Item>& items, F&& transform)
+auto mapSettled(std::vector<Item> items, F&& transform)
     -> AsyncOp<std::vector<SettledResult<U>>>;
 ```
 
