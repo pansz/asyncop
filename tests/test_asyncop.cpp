@@ -77,7 +77,7 @@ static void runValueTest(const std::string& testName,
 
 static ao::AsyncOp<std::string> simulateNetworkRequest(const std::string& request, int delay_ms, bool should_fail = false) {
     ao::AsyncOp<std::string> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
     
     ao::add_timeout(std::chrono::milliseconds(delay_ms), [result_state, request, should_fail]() {
         if (should_fail) {
@@ -94,7 +94,7 @@ static ao::AsyncOp<std::string> simulateNetworkRequest(const std::string& reques
 static ao::AsyncOp<int> simulateComputation(int value, int delay_ms, bool should_fail = false)
 {
     ao::AsyncOp<int> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
     
     ao::add_timeout(std::chrono::milliseconds(delay_ms), [result_state, value, should_fail]() {
         if (should_fail) {
@@ -1707,10 +1707,10 @@ void testStateHelpers()
     
     // Test isPending
     ao::AsyncOp<int> op1;
-    runTest("State isPending initially", true, op1.m_promise->isPending());
-    runTest("State not isResolved initially", false, op1.m_promise->isResolved());
-    runTest("State not isRejected initially", false, op1.m_promise->isRejected());
-    runTest("State not isSettled initially", false, op1.m_promise->isSettled());
+    runTest("State isPending initially", true, op1.promise()->isPending());
+    runTest("State not isResolved initially", false, op1.promise()->isResolved());
+    runTest("State not isRejected initially", false, op1.promise()->isRejected());
+    runTest("State not isSettled initially", false, op1.promise()->isSettled());
     
     // Test resolveWith
     op1.then([&](int value) {
@@ -1718,14 +1718,14 @@ void testStateHelpers()
         final_value = value;
     });
     
-    op1.m_promise->resolveWith(42);
+    op1.promise()->resolveWith(42);
     
     runEventLoopFor(50);
     
     runTest("resolveWith called callback", true, resolved_called);
     runValueTest("resolveWith set correct value", 42, final_value);
-    runTest("State isResolved after resolve", true, op1.m_promise->isResolved());
-    runTest("State isSettled after resolve", true, op1.m_promise->isSettled());
+    runTest("State isResolved after resolve", true, op1.promise()->isResolved());
+    runTest("State isSettled after resolve", true, op1.promise()->isSettled());
     
     // Test rejectWith
     ao::AsyncOp<int> op2;
@@ -1733,21 +1733,21 @@ void testStateHelpers()
         rejected_called = true;
     });
     
-    op2.m_promise->rejectWith(ao::ErrorCode::NetworkError);
+    op2.promise()->rejectWith(ao::ErrorCode::NetworkError);
     
     runEventLoopFor(50);
     
     runTest("rejectWith called callback", true, rejected_called);
-    runTest("State isRejected after reject", true, op2.m_promise->isRejected());
-    runTest("State isSettled after reject", true, op2.m_promise->isSettled());
+    runTest("State isRejected after reject", true, op2.promise()->isRejected());
+    runTest("State isSettled after reject", true, op2.promise()->isSettled());
 
     // Test errorCode() and id() getters
     runTest("errorCode() returns NetworkError",
-            ao::ErrorCode::NetworkError == op2.m_promise->getErrorCode(), true);
+            ao::ErrorCode::NetworkError == op2.promise()->getErrorCode(), true);
     runTest("errorCode() via AsyncOp accessor",
             ao::ErrorCode::NetworkError == op2.errorCode(), true);
     runTest("id() returns positive value", op1.id() > 0, true);
-    runTest("id() consistent with op_id", op1.id() == op1.m_promise->op_id, true);
+    runTest("id() consistent with op_id", op1.id() == op1.promise()->op_id, true);
 }
 
 void testIdempotency()
@@ -1764,9 +1764,9 @@ void testIdempotency()
         final_value = value;
     });
     
-    op.resolve(10);
-    op.resolve(20);  // Should be ignored
-    op.reject(ao::ErrorCode::NetworkError);  // Should be ignored
+    op.promise()->resolveWith(10);
+    op.promise()->resolveWith(20);  // Should be ignored
+    op.promise()->rejectWith(ao::ErrorCode::NetworkError);  // Should be ignored
     
     runEventLoopFor(100);
     

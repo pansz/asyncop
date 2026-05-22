@@ -370,6 +370,7 @@ public:
 
     };
     
+private:
     Promise<T> m_promise;
 
 public:
@@ -394,14 +395,14 @@ public:
 
     static AsyncOp<T> resolved(T value) {
         AsyncOp<T> op;
-        op.m_promise->resolveWith(std::move(value));
+        op.promise()->resolveWith(std::move(value));
         spdlog::debug("AsyncOp[{}] created as resolved", op.id());
         return op;
     }
     
     static AsyncOp<T> rejected(ErrorCode err) {
         AsyncOp<T> op;
-        op.m_promise->rejectWith(err);
+        op.promise()->rejectWith(err);
         spdlog::debug("AsyncOp[{}] created as rejected with error {}", 
                      op.id(), err);
         return op;
@@ -427,7 +428,7 @@ public:
 
         // Declare next_op early so we can return it if needed
         AsyncOp<RetType> next_op;
-        auto next_state = next_op.m_promise;
+        auto next_state = next_op.promise();
 
         if (!m_promise->canOverwriteSuccessCallback()) {
             spdlog::error("AsyncOp[{}] then() called after terminal handler - callback ignored", id());
@@ -598,7 +599,7 @@ public:
         spdlog::trace("AsyncOp[{}] adding recover() handler", id());
         
         AsyncOp<T> next_op;
-        auto next_state = next_op.m_promise;
+        auto next_state = next_op.promise();
         auto op_id = m_promise->op_id;
 
         if (!m_promise->canOverwriteErrorCallback()) {
@@ -732,7 +733,7 @@ public:
             spdlog::trace("AsyncOp[{}] adding next() with dual handlers", id());
 
             AsyncOp<RetType> next_op;
-            auto next_state = next_op.m_promise;
+            auto next_state = next_op.promise();
             auto op_id = m_promise->op_id;
 
             if (!m_promise->canOverwriteSuccessCallback()) {
@@ -747,14 +748,27 @@ public:
                     detail::executeProtected([&]() {
                         if constexpr (is_async_op_v<SuccessInvokeResult>) {
                             auto result_op = success_handler(std::move(val));
-                            result_op
-                                .then([next_state](RetType value) mutable {
-                                    next_state->resolveWith(std::move(value));
-                                })
-                                .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                            if constexpr (std::is_void_v<RetType>) {
+                                result_op
+                                    .then([next_state]() mutable {
+                                        next_state->resolveWith();
+                                    })
+                                    .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                            } else {
+                                result_op
+                                    .then([next_state](RetType value) mutable {
+                                        next_state->resolveWith(std::move(value));
+                                    })
+                                    .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                            }
                         } else {
-                            RetType result = success_handler(std::move(val));
-                            next_state->resolveWith(std::move(result));
+                            if constexpr (std::is_void_v<RetType>) {
+                                success_handler(std::move(val));
+                                next_state->resolveWith();
+                            } else {
+                                RetType result = success_handler(std::move(val));
+                                next_state->resolveWith(std::move(result));
+                            }
                         }
                     }, op_id, "next() success handler", [next_state](ErrorCode e) { next_state->rejectWith(e); });
                 };
@@ -772,13 +786,27 @@ public:
                     detail::executeProtectedWithErrorCode([&]() {
                         if constexpr (is_async_op_v<ErrorInvokeResult>) {
                             auto result_op = error_handler(err);
-                            result_op
-                                .then([next_state](RetType value) mutable {
-                                    next_state->resolveWith(std::move(value)); })
-                                .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                            if constexpr (std::is_void_v<RetType>) {
+                                result_op
+                                    .then([next_state]() mutable {
+                                        next_state->resolveWith();
+                                    })
+                                    .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                            } else {
+                                result_op
+                                    .then([next_state](RetType value) mutable {
+                                        next_state->resolveWith(std::move(value));
+                                    })
+                                    .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                            }
                         } else {
-                            RetType result = error_handler(err);
-                            next_state->resolveWith(std::move(result));
+                            if constexpr (std::is_void_v<RetType>) {
+                                error_handler(err);
+                                next_state->resolveWith();
+                            } else {
+                                RetType result = error_handler(err);
+                                next_state->resolveWith(std::move(result));
+                            }
                         }
                     }, op_id, "next() error handler", [next_state](ErrorCode e) { next_state->rejectWith(e); });
                 };
@@ -816,7 +844,7 @@ public:
         spdlog::debug("AsyncOp[{}] setting timeout of {}ms", id(), duration.count());
         
         AsyncOp<T> timed_op;
-        auto timed_state = timed_op.m_promise;
+        auto timed_state = timed_op.promise();
         auto expired = std::make_shared<bool>(false);
         
         auto timer = add_timeout(duration, [timed_state, expired]() {
@@ -917,7 +945,7 @@ public:
         spdlog::trace("AsyncOp[{}] adding finally", id());
         
         AsyncOp<T> result;
-        auto result_state = result.m_promise;
+        auto result_state = result.promise();
         auto cleanup = std::make_shared<F>(std::forward<F>(cleanup_fn));
         auto cleanup_done = std::make_shared<bool>(false);
 
@@ -1111,7 +1139,7 @@ public:
         spdlog::trace("AsyncOp[{}] adding filter with dual handlers", id());
 
         AsyncOp<T> result;
-        auto result_state = result.m_promise;
+        auto result_state = result.promise();
         auto op_id = m_promise->op_id;
 
         // Set up success filter
@@ -1235,37 +1263,6 @@ public:
         return filter(nullptr, std::forward<ErrorF>(errorFilter));
     }
 
-    // Idempotent resolve/reject - these check isPending() internally
-    void resolve(T value) {
-        if (!isPending()) {
-            spdlog::warn("AsyncOp[{}] already completed, ignoring resolve", m_promise->op_id);
-            return;
-        }
-        
-        spdlog::debug("AsyncOp[{}] resolved", m_promise->op_id);
-        m_promise->result_value = std::move(value);
-        m_promise->setStatus(State::Resolved);
-        
-        if (m_promise->success_cb) {
-            m_promise->success_cb(std::move(m_promise->result_value));
-        }
-    }
-
-    void reject(ErrorCode err) {
-        if (!isPending()) {
-            spdlog::warn("AsyncOp[{}] already completed, ignoring reject", m_promise->op_id);
-            return;
-        }
-
-        spdlog::debug("AsyncOp[{}] rejected with error {}", m_promise->op_id, err);
-        m_promise->setErrorCode(err);
-        m_promise->setStatus(State::Rejected);
-
-        if (m_promise->error_cb) {
-            m_promise->error_cb(err);
-        }
-    }
-    
     using value_type = T;
 };
 
@@ -1325,7 +1322,7 @@ AsyncOp<T> retryWithBackoff(F&& operation, int max_attempts,
                  max_attempts, initial_delay.count());
     
     AsyncOp<T> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
     
     // State struct with attempt logic
     struct RetryState {
@@ -1405,20 +1402,20 @@ AsyncOp<T> retry(F&& operation, int max_attempts) {
  * For parallel processing, use all() or mapParallel().
  */
 template<typename T, typename F>
-AsyncOp<void> forEach(const std::vector<T>& items, F&& process) {
+AsyncOp<void> forEach(std::vector<T> items, F&& process) {
     spdlog::debug("forEach starting with {} items", items.size());
 
     AsyncOp<void> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
 
     struct ForEachState {
         size_t index = 0;
-        const std::vector<T>& items;
+        std::vector<T> items;
         F process;
         Promise<void> promise;
 
-        ForEachState(const std::vector<T>& it, F&& proc, Promise<void> prom)
-            : items(it), process(std::forward<F>(proc)), promise(prom) {}
+        ForEachState(std::vector<T>&& it, F&& proc, Promise<void> prom)
+            : items(std::move(it)), process(std::forward<F>(proc)), promise(prom) {}
 
         void processNext(std::shared_ptr<ForEachState> self) {
             if (index >= items.size()) {
@@ -1442,7 +1439,7 @@ AsyncOp<void> forEach(const std::vector<T>& items, F&& process) {
         }
     };
 
-    auto state = std::make_shared<ForEachState>(items, std::forward<F>(process), result_state);
+    auto state = std::make_shared<ForEachState>(std::move(items), std::forward<F>(process), result_state);
     state->processNext(state);
     return result;
 }
@@ -1457,11 +1454,11 @@ AsyncOp<void> forEach(const std::vector<T>& items, F&& process) {
  * @return AsyncOp<std::vector<T>> containing only the items that failed processing
  */
 template<typename Item, typename F>
-AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& process) {
+AsyncOp<std::vector<Item>> forEachSettled(std::vector<Item> items, F&& process) {
     spdlog::debug("forEachSettled() starting with {} items", items.size());
 
     AsyncOp<std::vector<Item>> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
 
     if (items.empty()) {
         spdlog::debug("forEachSettled() called with 0 items");
@@ -1470,13 +1467,13 @@ AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& pr
 
     struct ForEachSettledState {
         size_t index = 0;
-        const std::vector<Item>& items;
+        std::vector<Item> items;
         F process;
         Promise<std::vector<Item>> promise;
         std::vector<Item> failed_items;
 
-        ForEachSettledState(const std::vector<Item>& it, F&& proc, Promise<std::vector<Item>> prom)
-            : items(it), process(std::forward<F>(proc)), promise(prom) {}
+        ForEachSettledState(std::vector<Item>&& it, F&& proc, Promise<std::vector<Item>> prom)
+            : items(std::move(it)), process(std::forward<F>(proc)), promise(prom) {}
 
         void processNext(std::shared_ptr<ForEachSettledState> self) {
             if (index >= items.size()) {
@@ -1504,7 +1501,7 @@ AsyncOp<std::vector<Item>> forEachSettled(const std::vector<Item>& items, F&& pr
         }
     };
 
-    auto state = std::make_shared<ForEachSettledState>(items, std::forward<F>(process), result_state);
+    auto state = std::make_shared<ForEachSettledState>(std::move(items), std::forward<F>(process), result_state);
     state->processNext(state);
     return result;
 }
@@ -1535,7 +1532,7 @@ struct SettledResult {
  * @return AsyncOp<std::vector<SettledResult<T>>> where T is the unwrapped result type of transform()
  */
 template<typename Item, typename F>
-auto mapSettled(const std::vector<Item>& items, F&& transform)
+auto mapSettled(std::vector<Item> items, F&& transform)
     -> AsyncOp<std::vector<SettledResult<unwrap_async_op_t<typename std::invoke_result<F, Item>::type>>>> {
 
     using InvokeResult = typename std::invoke_result<F, Item>::type;
@@ -1544,7 +1541,7 @@ auto mapSettled(const std::vector<Item>& items, F&& transform)
     spdlog::debug("mapSettled() starting with {} items", items.size());
 
     AsyncOp<std::vector<SettledResult<RetType>>> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
 
     if (items.empty()) {
         spdlog::debug("mapSettled() called with 0 items");
@@ -1553,13 +1550,13 @@ auto mapSettled(const std::vector<Item>& items, F&& transform)
 
     struct MapSettledState {
         size_t index = 0;
-        const std::vector<Item>& items;
+        std::vector<Item> items;
         F transform;
         Promise<std::vector<SettledResult<RetType>>> promise;
         std::vector<SettledResult<RetType>> results;
 
-        MapSettledState(const std::vector<Item>& it, F&& trans, Promise<std::vector<SettledResult<RetType>>> prom)
-            : items(it), transform(std::forward<F>(trans)), promise(prom) {
+        MapSettledState(std::vector<Item>&& it, F&& trans, Promise<std::vector<SettledResult<RetType>>> prom)
+            : items(std::move(it)), transform(std::forward<F>(trans)), promise(prom) {
             results.resize(items.size());
         }
 
@@ -1589,7 +1586,7 @@ auto mapSettled(const std::vector<Item>& items, F&& transform)
         }
     };
 
-    auto state = std::make_shared<MapSettledState>(items, std::forward<F>(transform), result_state);
+    auto state = std::make_shared<MapSettledState>(std::move(items), std::forward<F>(transform), result_state);
     state->processNext(state);
     return result;
 }
@@ -1607,7 +1604,7 @@ AsyncOp<T> pollUntil(F&& operation, Pred&& condition, int max_attempts,
                  max_attempts, interval.count());
 
     AsyncOp<T> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
 
     struct PollUntilState {
         int attempt = 0;
@@ -1671,7 +1668,7 @@ AsyncOp<std::vector<T>> all(std::vector<AsyncOp<T>> operations) {
     spdlog::debug("all() waiting for {} operations", operations.size());
 
     AsyncOp<std::vector<T>> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
     auto results = std::make_shared<std::vector<T>>();
     auto completed = std::make_shared<std::atomic<size_t>>(0);
     auto failed = std::make_shared<std::atomic<bool>>(false);
@@ -1722,7 +1719,7 @@ AsyncOp<T> race(std::vector<AsyncOp<T>> operations) {
     spdlog::debug("race() racing {} operations (first to settle wins)", operations.size());
 
     AsyncOp<T> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
     auto completed = std::make_shared<std::atomic<bool>>(false);
     auto total = operations.size();
 
@@ -1764,7 +1761,7 @@ AsyncOp<T> any(std::vector<AsyncOp<T>> operations) {
     spdlog::debug("any() racing {} operations (first success wins)", operations.size());
 
     AsyncOp<T> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
     auto completed = std::make_shared<std::atomic<bool>>(false);
     auto failed_count = std::make_shared<std::atomic<size_t>>(0);
     auto total = operations.size();
@@ -1806,7 +1803,7 @@ inline AsyncOp<void> delay(std::chrono::milliseconds duration) {
     spdlog::debug("delay() scheduling for {}ms", duration.count());
     
     AsyncOp<void> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
     
     add_timeout(duration, [result_state]() {
         spdlog::debug("delay() timer fired");
@@ -1831,7 +1828,7 @@ auto defer(F&& f) -> AsyncOp<typename std::invoke_result<F>::type> {
     spdlog::trace("defer() scheduling function");
     
     AsyncOp<RetType> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
     auto func = std::function<RetType()>(std::forward<F>(f));
     
     add_idle([result_state, func = std::move(func)]() {
@@ -1863,7 +1860,7 @@ AsyncOp<std::vector<SettledResult<T>>> allSettled(std::vector<AsyncOp<T>> operat
     spdlog::debug("allSettled() waiting for {} operations", operations.size());
 
     AsyncOp<std::vector<SettledResult<T>>> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
     auto results = std::make_shared<std::vector<SettledResult<T>>>();
     auto completed = std::make_shared<std::atomic<size_t>>(0);
     auto total = operations.size();
@@ -1911,7 +1908,7 @@ AsyncOp<std::vector<SettledResult<T>>> allSettled(std::vector<AsyncOp<T>> operat
  * For parallel processing, use mapParallel().
  */
 template<typename T, typename F>
-auto map(const std::vector<T>& items, F&& transform)
+auto map(std::vector<T> items, F&& transform)
     -> AsyncOp<std::vector<unwrap_async_op_t<typename std::invoke_result<F, T>::type>>> {
 
     using InvokeResult = typename std::invoke_result<F, T>::type;
@@ -1920,17 +1917,17 @@ auto map(const std::vector<T>& items, F&& transform)
     spdlog::debug("map() starting with {} items", items.size());
 
     AsyncOp<std::vector<RetType>> result;
-    auto result_state = result.m_promise;
+    auto result_state = result.promise();
 
     struct MapState {
         size_t index = 0;
-        const std::vector<T>& items;
+        std::vector<T> items;
         F transform;
         Promise<std::vector<RetType>> promise;
         std::vector<RetType> results;
 
-        MapState(const std::vector<T>& it, F&& trans, Promise<std::vector<RetType>> prom)
-            : items(it), transform(std::forward<F>(trans)), promise(prom) {
+        MapState(std::vector<T>&& it, F&& trans, Promise<std::vector<RetType>> prom)
+            : items(std::move(it)), transform(std::forward<F>(trans)), promise(prom) {
             results.reserve(items.size());
         }
 
@@ -1956,7 +1953,7 @@ auto map(const std::vector<T>& items, F&& transform)
         }
     };
 
-    auto state = std::make_shared<MapState>(items, std::forward<F>(transform), result_state);
+    auto state = std::make_shared<MapState>(std::move(items), std::forward<F>(transform), result_state);
     state->processNext(state);
     return result;
 }
@@ -1968,7 +1965,7 @@ auto map(const std::vector<T>& items, F&& transform)
  * For sequential processing, use map().
  */
 template<typename T, typename F>
-auto mapParallel(const std::vector<T>& items, F&& transform) 
+auto mapParallel(std::vector<T> items, F&& transform) 
     -> AsyncOp<std::vector<unwrap_async_op_t<typename std::invoke_result<F, T>::type>>> {
     
     using InvokeResult = typename std::invoke_result<F, T>::type;

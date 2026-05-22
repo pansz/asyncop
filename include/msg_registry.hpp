@@ -26,7 +26,7 @@
  * // Send message
  * ao::AsyncOp<ResponseData> sendRequest(const Request& req) {
  *     ao::AsyncOp<ResponseData> result;
- *     int64_t msg_id = registry.registerMessage(result.m_promise, std::chrono::seconds(5));
+ *     int64_t msg_id = registry.registerMessage(result.promise(), std::chrono::seconds(5));
  *     sendMessageToNetwork(msg_id, req);
  *     return result;
  * }
@@ -249,14 +249,22 @@ public:
     MsgRegistry() = default;
     
     /**
-     * @brief Destroy registry and cleanup pending messages
+     * @brief Destroy registry and cleanup pending timeout timers
      *
-     * Rejects all pending messages with ErrorCode::Cancelled
+     * Cancels all pending timeout timers to prevent dangling callbacks.
+     * Does NOT reject AsyncOp states or call user callbacks - use clearAll()
+     * explicitly before destruction if you need to notify pending operations.
+     *
+     * @note Skips spdlog to avoid issues during global destruction
      */
     ~MsgRegistry() {
-        // Don't call clearAll() in destructor to avoid issues during global cleanup
-        // where spdlog might already be destroyed
-        // Instead, rely on users to call clearAll() before global cleanup if needed
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& [id, pending] : pending_) {
+            if (pending.timeout_timer != 0) {
+                remove_timeout(pending.timeout_timer);
+            }
+        }
+        pending_.clear();
     }
     
     // Non-copyable
@@ -300,7 +308,7 @@ public:
      * 
      * @example
      * ao::AsyncOp<Response> result;
-     * int64_t id = registry.registerMessage(result.m_promise, std::chrono::seconds(5));
+     * int64_t id = registry.registerMessage(result.promise(), std::chrono::seconds(5));
      * sendToNetwork(id, data);
      */
     MessageId registerMessage(Promise<ResponseType> state, 

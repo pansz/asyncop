@@ -69,6 +69,7 @@ public:
 
     };
     
+private:
     Promise<void> m_promise;
 
 public:
@@ -93,14 +94,14 @@ public:
 
     static AsyncOp<void> resolved() {
         AsyncOp<void> op;
-        op.m_promise->resolveWith();
+        op.promise()->resolveWith();
         spdlog::debug("AsyncOp[{}] created as resolved", op.id());
         return op;
     }
     
     static AsyncOp<void> rejected(ErrorCode err) {
         AsyncOp<void> op;
-        op.m_promise->rejectWith(err);
+        op.promise()->rejectWith(err);
         spdlog::debug("AsyncOp[{}] created as rejected with error {}", 
                      op.id(), err);
         return op;
@@ -126,7 +127,7 @@ public:
 
         // Declare next_op early so we can return it if needed
         AsyncOp<RetType> next_op;
-        auto next_state = next_op.m_promise;
+        auto next_state = next_op.promise();
 
         if (!m_promise->canOverwriteSuccessCallback()) {
             spdlog::error("AsyncOp[{}] then() called after terminal handler - callback ignored", id());
@@ -293,7 +294,7 @@ public:
         spdlog::trace("AsyncOp[{}] adding recover() handler", id());
         
         AsyncOp<void> next_op;
-        auto next_state = next_op.m_promise;
+        auto next_state = next_op.promise();
         auto op_id = m_promise->op_id;
 
         if (!m_promise->canOverwriteErrorCallback()) {
@@ -422,7 +423,7 @@ public:
             
             AsyncOp<void> next_op;
 
-            auto next_state = next_op.m_promise;
+            auto next_state = next_op.promise();
             auto op_id = m_promise->op_id;
 
             if (!m_promise->canOverwriteSuccessCallback()) {
@@ -501,7 +502,7 @@ public:
         spdlog::debug("AsyncOp[{}] setting timeout of {}ms", id(), duration.count());
         
         AsyncOp<void> timed_op;
-        auto timed_state = timed_op.m_promise;
+        auto timed_state = timed_op.promise();
         auto expired = std::make_shared<bool>(false);
         
         auto timer = add_timeout(duration, [timed_state, expired]() {
@@ -601,7 +602,7 @@ public:
         spdlog::trace("AsyncOp[{}] adding finally", id());
         
         AsyncOp<void> result;
-        auto result_state = result.m_promise;
+        auto result_state = result.promise();
         auto cleanup = std::make_shared<F>(std::forward<F>(cleanup_fn));
         auto cleanup_done = std::make_shared<bool>(false);
 
@@ -783,7 +784,7 @@ public:
         spdlog::trace("AsyncOp[{}] adding filter with dual handlers", id());
 
         AsyncOp<void> result;
-        auto result_state = result.m_promise;
+        auto result_state = result.promise();
         auto op_id = m_promise->op_id;
 
         // Set up success filter
@@ -900,37 +901,6 @@ public:
         return filter(nullptr, std::forward<ErrorF>(errorFilter));
     }
 
-    // Idempotent resolve/reject
-    void resolve() {
-        if (!isPending()) {
-            spdlog::warn("AsyncOp[{}] already completed, ignoring resolve", m_promise->op_id);
-            return;
-        }
-        
-        spdlog::debug("AsyncOp[{}] resolved", m_promise->op_id);
-
-        m_promise->setStatus(State::Resolved);
-        
-        if (m_promise->success_cb) {
-            m_promise->success_cb();
-        }
-    }
-
-    void reject(ErrorCode err) {
-        if (!isPending()) {
-            spdlog::warn("AsyncOp[{}] already completed, ignoring reject", m_promise->op_id);
-            return;
-        }
-
-        spdlog::debug("AsyncOp[{}] rejected with error {}", m_promise->op_id, err);
-        m_promise->setErrorCode(err);
-        m_promise->setStatus(State::Rejected);
-
-        if (m_promise->error_cb) {
-            m_promise->error_cb(err);
-        }
-    }
-    
     using value_type = void;
 };
 

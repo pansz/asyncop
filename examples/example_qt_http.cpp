@@ -50,7 +50,7 @@ ao::AsyncOp<HttpResponse> httpGet(QNetworkAccessManager* manager, const QString&
     spdlog::info("Making HTTP GET request to: {}", url.toStdString());
     
     ao::AsyncOp<HttpResponse> result;
-    auto promise = result.m_promise;
+    auto promise = result.promise();
     
     // Create network request
     QNetworkRequest request;
@@ -118,7 +118,7 @@ ao::AsyncOp<HttpResponse> httpPost(QNetworkAccessManager* manager, const QString
     spdlog::info("Making HTTP POST request to: {} with {} bytes", url.toStdString(), data.size());
     
     ao::AsyncOp<HttpResponse> result;
-    auto promise = result.m_promise;
+    auto promise = result.promise();
     
     // Create network request
     QNetworkRequest request;
