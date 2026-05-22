@@ -445,9 +445,14 @@ fetchData()
 
 // Pattern 2: Set error handler mid-chain
 fetchData()
-    .onError([](ErrorCode e) { logError(e); })
-    .then([](Data d) { return process(d); });  // Success path continues
+    .onError([](ErrorCode e) { logError(e); })   // Only catches fetchData() errors
+    .then([](Data d) { return process(d); })      // Runs if fetchData() succeeded
+    .onError([](ErrorCode e) { handleProcessError(e); });  // Catches process() errors
 ```
+
+> **Important:** `onError()` is a **terminal handler** for the operation preceding it.
+> It does not propagate errors to subsequent chained operations.
+> Each stage in the chain should have its own error handler if needed.
 
 ### Filtering Methods
 
@@ -1231,16 +1236,19 @@ fetchFromPrimary()
 
 ### Parallel Execution with Dependencies
 
-```cpp
-auto user_op = fetchUser(id);
-auto settings_op = fetchSettings(id);
+> **Note:** `all()` requires all operations to return the **same type**.
+> For combining different types, use independent callbacks or a struct wrapper.
 
-ao::all({user_op, settings_op})
-    .then([](std::vector<std::any> results) {
-        // Both completed - now do something that needs both
-        User user = /* extract from results[0] */;
-        Settings settings = /* extract from results[1] */;
-        return initialize(user, settings);
+```cpp
+// All operations must return the same type
+auto op1 = fetchUser(id);
+auto op2 = fetchUser(other_id);
+
+ao::all({op1, op2})
+    .then([](std::vector<User> users) {
+        auto user1 = users[0];
+        auto user2 = users[1];
+        return processUsers(user1, user2);
     });
 ```
 
