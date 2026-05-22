@@ -72,8 +72,7 @@ namespace ao {
  */
 class IdGen {
 private:
-    std::atomic<int64_t> last_timestamp_ms_{0};
-    std::atomic<int32_t> global_counter_{0};  // Continuous counter across time periods
+    std::atomic<uint32_t> global_counter_{0};  // Continuous counter across time periods
 
     // Counter uses 21 bits (0 to 2,097,151)
     static constexpr int32_t COUNTER_BITS = 21;
@@ -91,7 +90,6 @@ public:
      *
      * @note Thread-safe
      * @note IDs are monotonically increasing globally by using continuous counter
-     * @note Automatically handles clock skew by using continuous counter increment
      */
     int64_t generateId() {
         // Get current timestamp in milliseconds since epoch
@@ -109,16 +107,6 @@ public:
         // Extract counter portion (masked to fit in 22 bits)
         int32_t counter_part = static_cast<int32_t>(current_counter & COUNTER_MASK);
         
-        // Update the last timestamp if the current one is greater
-        int64_t expected_last = last_timestamp_ms_.load(std::memory_order_relaxed);
-        while (now_ms > expected_last) {
-            if (last_timestamp_ms_.compare_exchange_weak(expected_last, now_ms, 
-                                                       std::memory_order_relaxed)) {
-                break;  // Successfully updated
-            }
-            // If CAS failed, expected_last was updated, try again
-        }
-
         // Combine: [0 | 41-bit timestamp | 22-bit counter]
         // Use unsigned for bit operations, then cast to signed
         uint64_t timestamp_part = static_cast<uint64_t>(now_ms) << COUNTER_BITS;
