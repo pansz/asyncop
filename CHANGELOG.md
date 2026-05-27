@@ -5,9 +5,22 @@ All notable changes to AsyncOp will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Latest:** [2.5.0](#250---2026-05-22) - See [README.md](README.md#version) for brief summary.
+**Latest:** [2.5.2](#252---2026-05-27) - See [README.md](README.md#version) for brief summary.
 
 ---
+
+## [2.5.2] - 2026-05-27
+
+### Fixed
+- `AsyncOp<T>` now supports non-default-constructible types - `State::result_value` uses `std::optional<T>` internally, removing the requirement for `T` to have a default constructor. `all()` also uses `std::vector<std::optional<T>>` internally before converting to `std::vector<T>`.
+
+### Known Limitations
+- `allSettled()` and `mapSettled()` still require `T` to be default-constructible due to `SettledResult<T>` containing a public `T value` member. Changing this would be a breaking API change.
+
+## [2.5.1] - 2026-05-27
+
+### Fixed
+- `then()` compilation failure when handler returns `AsyncOp<void>` - Both `AsyncOp<T>::then()` and `AsyncOp<void>::then()` now use compile-time branching to handle `void` return types correctly. Previously, the generic lambda `[](auto v){...}` would fail to compile because `AsyncOp<void>::then()` passes no arguments to the handler.
 
 ## [2.5.0] - 2026-05-22
 

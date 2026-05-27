@@ -141,15 +141,19 @@ public:
                 detail::executeProtected([&]() {
                     if constexpr (is_async_op_v<InvokeResult>) {
                         auto future_result = f();
-                        future_result
-                            .then([next_state](auto v) mutable {
-                                if constexpr (std::is_void_v<RetType>) {
+                        if constexpr (std::is_void_v<RetType>) {
+                            future_result
+                                .then([next_state]() mutable {
                                     next_state->resolveWith();
-                                } else {
+                                })
+                                .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                        } else {
+                            future_result
+                                .then([next_state](auto v) mutable {
                                     next_state->resolveWith(std::move(v));
-                                }
-                            })
-                            .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                                })
+                                .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                        }
                     } else {
                         if constexpr (std::is_void_v<RetType>) {
                             f();

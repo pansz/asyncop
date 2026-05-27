@@ -2762,6 +2762,102 @@ void testVoidTimeout()
     runTest("AsyncOp<void>::timeout() fast success", true, fast_completed);
 }
 
+void testThenReturnsAsyncOpVoid()
+{
+    std::cout << "\n=== Testing then() returning AsyncOp<void> ===" << std::endl;
+
+    // Test 1: then() handler returns AsyncOp<void>, chain continues
+    bool chain_completed = false;
+    ao::AsyncOp<int>::resolved(42)
+        .then([](int value) {
+            ao::AsyncOp<void> op;
+            auto promise = op.promise();
+            ao::add_timeout(std::chrono::milliseconds(10), [promise]() {
+                promise->resolveWith();
+                return false;
+            });
+            return op;
+        })
+        .then([&]() {
+            chain_completed = true;
+        });
+
+    runEventLoopFor(50);
+    runTest("then() returning AsyncOp<void> chain completes", true, chain_completed);
+
+    // Test 2: then() handler returns AsyncOp<void> with error propagation
+    bool error_propagated = false;
+    ao::AsyncOp<int>::resolved(42)
+        .then([](int) {
+            return ao::AsyncOp<void>::rejected(ao::ErrorCode::NetworkError);
+        })
+        .onError([&](ao::ErrorCode err) {
+            error_propagated = (err == ao::ErrorCode::NetworkError);
+        });
+
+    runEventLoopFor(50);
+    runTest("then() returning AsyncOp<void> error propagation", true, error_propagated);
+}
+
+void testVoidThenReturnsAsyncOpVoid()
+{
+    std::cout << "\n=== Testing AsyncOp<void>::then() returning AsyncOp<void> ===" << std::endl;
+
+    // Test 1: AsyncOp<void>::then() handler returns AsyncOp<void>
+    bool chain_completed = false;
+    ao::AsyncOp<void>::resolved()
+        .then([]() {
+            ao::AsyncOp<void> op;
+            auto promise = op.promise();
+            ao::add_timeout(std::chrono::milliseconds(10), [promise]() {
+                promise->resolveWith();
+                return false;
+            });
+            return op;
+        })
+        .then([&]() {
+            chain_completed = true;
+        });
+
+    runEventLoopFor(50);
+    runTest("AsyncOp<void>::then() returning AsyncOp<void> chain completes", true, chain_completed);
+
+    // Test 2: AsyncOp<void>::then() returns AsyncOp<void> with error propagation
+    bool error_propagated = false;
+    ao::AsyncOp<void>::resolved()
+        .then([]() {
+            return ao::AsyncOp<void>::rejected(ao::ErrorCode::Timeout);
+        })
+        .onError([&](ao::ErrorCode err) {
+            error_propagated = (err == ao::ErrorCode::Timeout);
+        });
+
+    runEventLoopFor(50);
+    runTest("AsyncOp<void>::then() returning AsyncOp<void> error propagation", true, error_propagated);
+}
+
+void testThenVoidChainOnError()
+{
+    std::cout << "\n=== Testing then() AsyncOp<void> chain error propagation ===" << std::endl;
+
+    // Test: then() returns AsyncOp<void> that rejects, onError catches it
+    bool error_caught = false;
+    ao::ErrorCode caught_error = ao::ErrorCode::None;
+    ao::AsyncOp<std::string>::resolved("hello")
+        .then([](const std::string&) {
+            return ao::AsyncOp<void>::rejected(ao::ErrorCode::Cancelled);
+        })
+        .onError([&](ao::ErrorCode err) {
+            error_caught = true;
+            caught_error = err;
+        });
+
+    runEventLoopFor(50);
+    runTest("then() void chain onError catches", true, error_caught);
+    runTest("then() void chain error code is Cancelled",
+            ao::ErrorCode::Cancelled == caught_error, true);
+}
+
 void testCancel()
 {
     std::cout << "\n=== Testing cancel() ===" << std::endl;
@@ -2869,6 +2965,93 @@ void testCancelWithTimerPattern()
 
     runTest("cancel() error handler called", true, cancel_handler_called);
     runTest("timer cancelled (did not fire)", false, timer_fired);
+}
+
+// ══════════════════════════════════════════════
+// PHASE 4: NON-DEFAULT-CONSTRUCTIBLE TYPE TESTS
+// ══════════════════════════════════════════════
+
+struct NoDefault {
+    int value;
+    NoDefault() = delete;
+    explicit NoDefault(int v) : value(v) {}
+    bool operator==(const NoDefault& o) const { return value == o.value; }
+};
+
+void testNoDefaultAsyncOp()
+{
+    std::cout << "\n=== Testing AsyncOp with non-default-constructible type ===" << std::endl;
+
+    bool then_called = false;
+
+    ao::AsyncOp<NoDefault> op;
+    auto state = op.promise();
+
+    op.then([&](NoDefault val) {
+        then_called = true;
+        runValueTest("NoDefault value", 42, val.value);
+    });
+
+    state->resolveWith(NoDefault(42));
+    runTest("NoDefault then called", true, then_called);
+}
+
+void testNoDefaultAll()
+{
+    std::cout << "\n=== Testing all() with non-default-constructible type ===" << std::endl;
+
+    bool all_resolved = false;
+    std::vector<NoDefault> results;
+
+    std::vector<ao::AsyncOp<NoDefault>> ops;
+    for (int i = 0; i < 3; ++i) {
+        ao::AsyncOp<NoDefault> op;
+        auto s = op.promise();
+        ao::add_timeout(std::chrono::milliseconds(10 + i * 10), [s, i]() {
+            s->resolveWith(NoDefault(i * 10));
+            return false;
+        });
+        ops.push_back(std::move(op));
+    }
+
+    ao::all(std::move(ops))
+        .then([&](std::vector<NoDefault> vals) {
+            all_resolved = true;
+            results = std::move(vals);
+        });
+
+    runEventLoopFor(200);
+
+    runTest("NoDefault all resolved", true, all_resolved);
+    if (results.size() == 3) {
+        runValueTest("NoDefault all result[0]", 0, results[0].value);
+        runValueTest("NoDefault all result[1]", 10, results[1].value);
+        runValueTest("NoDefault all result[2]", 20, results[2].value);
+    }
+}
+
+void testNoDefaultChain()
+{
+    std::cout << "\n=== Testing then() chain with non-default-constructible type ===" << std::endl;
+
+    bool complete = false;
+
+    ao::AsyncOp<NoDefault> op;
+    auto state = op.promise();
+
+    op.then([](NoDefault val) {
+        return NoDefault(val.value + 1);
+    })
+    .then([](NoDefault val) {
+        return NoDefault(val.value * 2);
+    })
+    .then([&](NoDefault val) {
+        complete = true;
+        runValueTest("chained NoDefault", 86, val.value);
+    });
+
+    state->resolveWith(NoDefault(42));
+    runTest("NoDefault chain complete", true, complete);
 }
 
 // ══════════════════════════════════════════════
@@ -3031,6 +3214,16 @@ int test_main_asyncop()
         testVoidFinally();
         testVoidFilterSuccessError();
         testVoidTimeout();
+
+        // Phase 3: AsyncOp<void> chaining tests
+        testThenReturnsAsyncOpVoid();
+        testVoidThenReturnsAsyncOpVoid();
+        testThenVoidChainOnError();
+
+        // Phase 4: Non-default-constructible type tests
+        testNoDefaultAsyncOp();
+        testNoDefaultAll();
+        testNoDefaultChain();
 
         // Integration
         testComplexScenario();

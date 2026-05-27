@@ -728,6 +728,18 @@ Several utility functions naturally return `AsyncOp<void>`:
 > op.then([](int x) { return x * 2; });  // Returns AsyncOp<int>
 > ```
 
+> **Async void chaining:** `then()` handlers can return `AsyncOp<void>` to chain async operations
+> that produce no value. The chain continues after the inner operation completes:
+> ```cpp
+> fetchData()
+>     .then([](Data data) {
+>         return saveToDisk(data);  // Returns AsyncOp<void>
+>     })
+>     .then([]() {
+>         spdlog::info("Save complete");
+>     });
+> ```
+
 ---
 
 ## Chaining Operations

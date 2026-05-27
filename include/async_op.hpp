@@ -25,6 +25,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <chrono>
 #include <vector>
@@ -323,7 +324,7 @@ public:
     struct State : AsyncOpStateBase {
         std::function<void(T)> success_cb;
         std::function<void(ErrorCode)> error_cb;
-        T result_value;
+        std::optional<T> result_value;
         
         State() : AsyncOpStateBase() {}
 
@@ -339,7 +340,7 @@ public:
             if (!isPending()) {
                 add_idle([self]() {
                     if (self->isResolved() && self->success_cb) {
-                        self->success_cb(std::move(self->result_value));
+                        self->success_cb(std::move(*self->result_value));
                     } else if (self->isRejected() && self->error_cb) {
                         self->error_cb(self->getErrorCode());
                     }
@@ -354,7 +355,7 @@ public:
             result_value = std::move(value);
             setStatus(Resolved);
             if (success_cb) {
-                success_cb(std::move(result_value));
+                success_cb(std::move(*result_value));
             }
         }
 
@@ -442,15 +443,19 @@ public:
                 detail::executeProtected([&]() {
                     if constexpr (is_async_op_v<InvokeResult>) {
                         auto future_result = f(std::move(val));
-                        future_result
-                            .then([next_state](auto v) mutable {
-                                if constexpr (std::is_void_v<RetType>) {
+                        if constexpr (std::is_void_v<RetType>) {
+                            future_result
+                                .then([next_state]() mutable {
                                     next_state->resolveWith();
-                                } else {
+                                })
+                                .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                        } else {
+                            future_result
+                                .then([next_state](auto v) mutable {
                                     next_state->resolveWith(std::move(v));
-                                }
-                            })
-                            .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                                })
+                                .onError([next_state](ErrorCode e) mutable { next_state->rejectWith(e); });
+                        }
                     } else {
                         if constexpr (std::is_void_v<RetType>) {
                             f(std::move(val));
@@ -515,7 +520,7 @@ public:
 
         if (isResolved()) {
             add_idle([state = m_promise]() {
-                state->success_cb(std::move(state->result_value));
+                state->success_cb(std::move(*state->result_value));
                 return false;
             });
         }
@@ -990,7 +995,7 @@ public:
         // Execute immediately if already settled
         if (isResolved() && m_promise->success_cb) {
             ao::add_idle([promise = m_promise]() {
-                promise->success_cb(std::move(promise->result_value));
+                promise->success_cb(std::move(*promise->result_value));
                 return false;
             });
         } else if (isRejected() && m_promise->error_cb) {
@@ -1669,7 +1674,7 @@ AsyncOp<std::vector<T>> all(std::vector<AsyncOp<T>> operations) {
 
     AsyncOp<std::vector<T>> result;
     auto result_state = result.promise();
-    auto results = std::make_shared<std::vector<T>>();
+    auto results = std::make_shared<std::vector<std::optional<T>>>();
     auto completed = std::make_shared<std::atomic<size_t>>(0);
     auto failed = std::make_shared<std::atomic<bool>>(false);
     auto total = operations.size();
@@ -1692,7 +1697,12 @@ AsyncOp<std::vector<T>> all(std::vector<AsyncOp<T>> operations) {
 
             if (count == total) {
                 spdlog::info("all() completed successfully", total);
-                result_state->resolveWith(std::move(*results));
+                std::vector<T> final_results;
+                final_results.reserve(results->size());
+                for (auto& opt : *results) {
+                    final_results.push_back(std::move(*opt));
+                }
+                result_state->resolveWith(std::move(final_results));
             }
         }).onError([=](ErrorCode err) {
             bool expected = false;
