@@ -287,6 +287,30 @@ void testThenException()
     runTest("then() executed before throw", true, then_executed);
 }
 
+void testThenThrowsErrorCode()
+{
+    std::cout << "\n=== Testing then() with thrown ErrorCode ===" << std::endl;
+
+    bool error_caught = false;
+    ao::ErrorCode caught_error = ao::ErrorCode::None;
+
+    ao::AsyncOp<int>::resolved(42)
+        .then([&](int val) -> int {
+            throw ao::ErrorCode::Timeout;
+            return val;  // Unreachable
+        })
+        .onError([&](ao::ErrorCode err) {
+            error_caught = true;
+            caught_error = err;
+        });
+
+    runEventLoopFor(50);
+
+    runTest("then() thrown ErrorCode caught", true, error_caught);
+    runTest("then() thrown ErrorCode preserved as Timeout",
+            ao::ErrorCode::Timeout == caught_error, true);
+}
+
 void testThenVoidReturn()
 {
     std::cout << "\n=== Testing then() T -> void Return Type ===" << std::endl;
@@ -3126,6 +3150,7 @@ int test_main_asyncop()
         testErrorPropagation();
         testErrorInMiddle();
         testThenException();
+        testThenThrowsErrorCode();
         testThenVoidReturn();
 
         // Error recovery (NEW)

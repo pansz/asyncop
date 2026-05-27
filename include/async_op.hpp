@@ -440,7 +440,7 @@ public:
             m_promise->success_cb = [f = std::forward<F>(f), next_state,
                                      op_id = m_promise->op_id](T val) mutable {
                 spdlog::debug("AsyncOp[{}] executing then() callback", op_id);
-                detail::executeProtected([&]() {
+                detail::executeProtectedWithErrorCode([&]() {
                     if constexpr (is_async_op_v<InvokeResult>) {
                         auto future_result = f(std::move(val));
                         if constexpr (std::is_void_v<RetType>) {
@@ -1696,7 +1696,7 @@ AsyncOp<std::vector<T>> all(std::vector<AsyncOp<T>> operations) {
             spdlog::trace("all() operation {}/{} completed", count, total);
 
             if (count == total) {
-                spdlog::info("all() completed successfully", total);
+                spdlog::info("all() completed successfully, total={}", total);
                 std::vector<T> final_results;
                 final_results.reserve(results->size());
                 for (auto& opt : *results) {

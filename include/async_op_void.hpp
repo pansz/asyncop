@@ -138,7 +138,7 @@ public:
             m_promise->success_cb = [f = std::forward<F>(f), next_state,
                                      op_id = m_promise->op_id]() mutable {
                 spdlog::debug("AsyncOp[{}] executing then() callback", op_id);
-                detail::executeProtected([&]() {
+                detail::executeProtectedWithErrorCode([&]() {
                     if constexpr (is_async_op_v<InvokeResult>) {
                         auto future_result = f();
                         if constexpr (std::is_void_v<RetType>) {
