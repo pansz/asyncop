@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Documentation and header comments for `.onError()` now explicitly state that it is a **terminal handler** and must not be followed by `.then()`, `.recover()`, `.timeout()`, etc. Removed the broken `.onError().then()` "Pattern 2" example that would cause downstream chains to hang forever on error.
 - Added `REVIEW_CHECKLIST.md` to `.gitignore`.
+- Documentation and header comments for `.timeout()` now explicitly warn that it must be called **before** terminal handlers (`.onSuccess()`, `.onError()`). It internally uses `.then()` / `.onError()` to intercept results, so the callback slots must still be available.
 
 ### Known Limitations
 - `allSettled()` and `mapSettled()` still require `T` to be default-constructible due to `SettledResult<T>` containing a public `T value` member. Changing this would be a breaking API change.

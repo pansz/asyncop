@@ -638,6 +638,22 @@ op1().then([](){ return op2(); }).timeout(3000ms);
 op1().then([](){ return op2().timeout(3000ms); });
 ```
 
+**⚠️ CRITICAL:** `.timeout()` must be called **before** terminal handlers (`.onSuccess()`, `.onError()`). It internally uses `.then()` / `.onError()` to intercept results, so the callback slots must still be available. Place `.timeout()` early in the chain.
+
+```cpp
+// ✅ Correct — timeout first, then terminal handlers
+fetchData()
+    .timeout(5000ms)
+    .then([](Data d) { return process(d); })
+    .onSuccess([](Result r) { display(r); })
+    .onError([](ErrorCode e) { logError(e); });
+
+// ❌ Wrong — terminal handler before timeout (assert/crash)
+fetchData()
+    .onSuccess([](Data d) { use(d); })
+    .timeout(5000ms);  // Cannot overwrite terminal handler!
+```
+
 **Timeline:**
 ```
 // Case 1: .timeout() after chain
