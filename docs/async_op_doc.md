@@ -431,28 +431,36 @@ AsyncOp<T>& onError(std::function<void(ErrorCode)> handler);
 ```
 
 **Returns:** Reference to `*this`
-**Can be used:**
-1. As end-of-chain: `.then().onError()`
-2. Before then(): `.onError().then()` (sets error handler, then continues)
 
 **Example:**
 ```cpp
-// Pattern 1: End of chain
+// End of chain
 fetchData()
     .then(process)
     .onSuccess([](Result r) { display(r); })
     .onError([](ErrorCode e) { logError(e); });
-
-// Pattern 2: Set error handler mid-chain
-fetchData()
-    .onError([](ErrorCode e) { logError(e); })   // Only catches fetchData() errors
-    .then([](Data d) { return process(d); })      // Runs if fetchData() succeeded
-    .onError([](ErrorCode e) { handleProcessError(e); });  // Catches process() errors
 ```
 
-> **Important:** `onError()` is a **terminal handler** for the operation preceding it.
-> It does not propagate errors to subsequent chained operations.
-> Each stage in the chain should have its own error handler if needed.
+> **⚠️ CRITICAL:** `onError()` is a **terminal handler**. Once called on an `AsyncOp` instance,
+> no further chaining (`.then()`, `.recover()`, `.timeout()`, etc.) is allowed on that instance.
+> The error is consumed by the handler and is **not propagated** to any downstream operations.
+>
+> **Wrong:** `.onError().then()` — the `.then()` chain will hang forever if an error occurs,
+> because the error is consumed by the terminal handler and never reaches the next operation.
+>
+> **Right:** Use `.recover()` or `.next()` if you need to handle errors and continue the chain:
+> ```cpp
+> // recover() converts error to success, then continues
+> fetchData()
+>     .recover([](ErrorCode e) { logError(e); return getDefaultData(); })
+>     .then([](Data d) { return process(d); });
+>
+> // next() handles both paths and converges to the same result type
+> fetchData()
+>     .next([](Data d) { return process(d); },
+>           [](ErrorCode e) { logError(e); return getDefaultData(); })
+>     .then([](Data d) { display(d); });
+> ```
 
 ### Filtering Methods
 

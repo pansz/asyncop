@@ -514,11 +514,12 @@ Special thanks to all contributors and users who have helped shape this library.
 
 ## Version
 
-**Current Version:** 2.5.0
-**Release Date:** 2026-05-22
+**Current Version:** 2.5.2
+**Release Date:** 2026-05-27
 **Author:** pansz
 
 **Changelog:**
+- v2.5.2: Fixed `all()` log format, fixed `then()` to preserve thrown `ErrorCode`, clarified `onError()` terminal semantics
 - v2.5.0: Fixed `next()` void return, collection dangling references, removed `resolve()`/`reject()`, made `m_promise` private, fixed `MessageRegistry` destructor
 - v2.4.2: Fixed `next()` static_assert order, removed IdGen dead code, clarified `onError()` terminal behavior
 - v2.4.1: Added `filterSuccess()`, `filterError()`, fixed `next()` nullptr handling

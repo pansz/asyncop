@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `AsyncOp<T>` now supports non-default-constructible types - `State::result_value` uses `std::optional<T>` internally, removing the requirement for `T` to have a default constructor. `all()` also uses `std::vector<std::optional<T>>` internally before converting to `std::vector<T>`.
+- `all()` log message now correctly includes the operation count (was missing `{}` format specifier).
+- `then()` now preserves thrown `ErrorCode` — previously, throwing an `ErrorCode` inside a `.then()` handler was caught by `catch (...)` and incorrectly converted to `ErrorCode::Exception`. It now uses `executeProtectedWithErrorCode`, matching the behavior of `recover()`, `filter()`, and `next()`.
+
+### Changed
+- Documentation and header comments for `.onError()` now explicitly state that it is a **terminal handler** and must not be followed by `.then()`, `.recover()`, `.timeout()`, etc. Removed the broken `.onError().then()` "Pattern 2" example that would cause downstream chains to hang forever on error.
+- Added `REVIEW_CHECKLIST.md` to `.gitignore`.
 
 ### Known Limitations
 - `allSettled()` and `mapSettled()` still require `T` to be default-constructible due to `SettledResult<T>` containing a public `T value` member. Changing this would be a breaking API change.

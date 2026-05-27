@@ -529,26 +529,33 @@ public:
 
     /**
      * @brief Set terminal error handler without creating a new AsyncOp
-     * 
-     * This method can be used in two ways:
-     * 1. As end-of-chain: .onSuccess().onError() or .then().onError()
-     * 2. Before then(): .onError().then() to set error handler before the next then() call
+     *
+     * Use this as the final handler in a chain. The error is consumed and
+     * is NOT propagated to downstream operations.
      *
      * @warning Calling onError() multiple times on the same AsyncOp instance will trigger an assertion
-     * @warning After onSuccess().onError(), the chain is terminated (no further calls allowed)
-     * @warning When used mid-chain, the next call must be then() to propagate success values
+     * @warning After onError(), no further chaining (.then(), .recover(), .timeout(), etc.)
+     *          is allowed on that AsyncOp instance.
+     *
+     * @note If you need to handle errors and continue the chain, use recover() or next() instead.
      *
      * @code
-     * // Pattern 1: End of chain
+     * // End of chain
      * fetchData()
      *     .then(process)
      *     .onSuccess([](Result r) { display(r); })
      *     .onError([](ErrorCode e) { logError(e); });
      *
-     * // Pattern 2: Set error handler before then()
+     * // recover() converts error to success, then continues
      * fetchData()
-     *     .onError([](ErrorCode e) { logError(e); })
-     *     .then([](Data d) { return process(d); }); // then() still needed for success path
+     *     .recover([](ErrorCode e) { logError(e); return getDefaultData(); })
+     *     .then([](Data d) { return process(d); });
+     *
+     * // next() handles both paths and converges to the same result type
+     * fetchData()
+     *     .next([](Data d) { return process(d); },
+     *           [](ErrorCode e) { logError(e); return getDefaultData(); })
+     *     .then([](Data d) { display(d); });
      * @endcode
      */
     AsyncOp<T>& onError(std::function<void(ErrorCode)> handler) {
